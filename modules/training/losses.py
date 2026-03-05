@@ -25,6 +25,30 @@ PHASE-2 (Soft-Assignment):
 # =========================
 
 def dual_softmax_loss(X, Y, temp=0.2):
+    """
+    Coarse descriptor matching loss using dual softmax (symmetric Sinkhorn-like).
+
+    Computes a soft assignment matrix P = softmax(S/temp, dim=1) * softmax(S/temp, dim=0)
+    where S = X @ Y^T is the similarity matrix between descriptor sets X and Y.
+    The loss is the negative log-likelihood that diagonal entries (ground-truth correspondences)
+    are assigned high probability.
+
+    Parameters
+    ----------
+    X : Tensor [N, C]
+        L2-normalised descriptors from image 1 (one per ground-truth correspondence).
+    Y : Tensor [N, C]
+        L2-normalised descriptors from image 2, same order as X (i-th row matches i-th in X).
+    temp : float
+        Temperature scaling for the similarity matrix.  Lower = sharper assignment.
+
+    Returns
+    -------
+    loss : scalar Tensor
+        Weighted NLL loss (multiplied by 2 for historical scaling).
+    conf_matrix : Tensor [N, N]
+        The dual-softmax assignment matrix (useful for diagnostics).
+    """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError('Error: X and Y shapes must match and be 2D matrices')
 
@@ -44,6 +68,22 @@ def dual_softmax_loss(X, Y, temp=0.2):
 
 
 def smooth_l1_loss(x, y, beta=1.0):
+    """
+    Element-wise Smooth-L1 (Huber) loss.
+
+    Quadratic for |x-y| < beta, linear beyond.  More robust to outliers than MSE.
+
+    Parameters
+    ----------
+    x, y : Tensor  (same shape)
+        Predictions and targets.
+    beta : float
+        Transition point between quadratic and linear regimes.
+
+    Returns
+    -------
+    Tensor (same shape as inputs) — per-element loss values.
+    """
     n = torch.abs(x - y)
     cond = n < beta
     loss = torch.where(cond, 0.5 * n ** 2 / beta, n - 0.5 * beta)
@@ -51,6 +91,26 @@ def smooth_l1_loss(x, y, beta=1.0):
 
 
 def fine_loss(coords1, coords2, margin=1.0, alpha=0.5):
+    """
+    Fine-level coordinate regression loss.
+
+    Computes per-pair Euclidean distance, applies Smooth-L1 with `margin`,
+    then maps through  alpha * (1 - exp(-loss))  to bound the contribution
+    of large errors (saturating loss).
+
+    Parameters
+    ----------
+    coords1, coords2 : Tensor [N, 2]
+        Predicted and target 2D coordinates.
+    margin : float
+        Smooth-L1 beta parameter.
+    alpha : float
+        Saturation scale.
+
+    Returns
+    -------
+    Scalar mean loss.
+    """
     dist = torch.norm(coords1 - coords2, dim=1)
     loss = smooth_l1_loss(dist, torch.zeros_like(dist), beta=margin)
     loss = alpha * (1.0 - torch.exp(-loss))
@@ -58,6 +118,32 @@ def fine_loss(coords1, coords2, margin=1.0, alpha=0.5):
 
 
 def alike_distill_loss(im, kp_map, scores, device='cuda'):
+    """
+    Keypoint distillation loss from the ALIKE detector.
+
+    Extracts ALIKE keypoints from the raw image, selects the top-300 XFeat
+    keypoints by score, and computes the mean distance from each XFeat keypoint
+    to its nearest ALIKE keypoint (in normalised [-1,1] image coordinates).
+    This encourages XFeat to predict keypoints near where ALIKE would.
+
+    Parameters
+    ----------
+    im : Tensor or ndarray
+        Input image (used by ALIKE detector).
+    kp_map : Tensor [1, 2, H, W]
+        XFeat keypoint coordinate map (not used directly here but kept for API).
+    scores : Tensor [H, W]
+        XFeat heatmap / keypoint score map.
+    device : str
+        Device for ALIKE inference.
+
+    Returns
+    -------
+    loss : scalar Tensor
+        Mean nearest-neighbor distance.
+    acc : scalar Tensor
+        Fraction of XFeat keypoints within 0.05 of an ALIKE keypoint.
+    """
     kp_alike = extract_alike_kpts(im, device=device)
 
     if len(kp_alike) < 1:
@@ -83,6 +169,31 @@ def alike_distill_loss(im, kp_map, scores, device='cuda'):
 
 
 def coordinate_classification_loss(coords_logits, pts1, pts2, conf, bins=8):
+    """
+    Fine coordinate-offset classification loss.
+
+    Quantises the (pts2 - pts1) offset into an 8x8 bin grid and trains the
+    network to predict the correct bin via cross-entropy.  The confidence
+    vector `conf` weights each sample (normalised to sum 1).
+
+    Parameters
+    ----------
+    coords_logits : Tensor [N, bins*bins]
+        Raw logits over the binned offset classes.
+    pts1, pts2 : Tensor [N, 2]
+        Coarse keypoint coordinates on the feature map for image 1 and 2.
+    conf : Tensor [N]
+        Per-match confidence from the coarse matching stage.
+    bins : int
+        Number of offset bins per axis (default 8 → 64 classes).
+
+    Returns
+    -------
+    loss : scalar Tensor
+        Weighted NLL loss (×2 for historical scaling).
+    acc : scalar Tensor
+        Top-1 classification accuracy.
+    """
     # pts are coarse coords on feature map; offsets in [-4,4] (assuming stride 8 logic)
     off = (pts2 - pts1).clamp(-4, 4).long() + 4
     labels = off[:, 1] * bins + off[:, 0]   # y*bins + x
@@ -99,10 +210,42 @@ def coordinate_classification_loss(coords_logits, pts1, pts2, conf, bins=8):
 
 
 def keypoint_loss(heatmap, target):
+    """
+    Keypoint reliability loss — L1 distance between the predicted heatmap and
+    a target heatmap (e.g. generated from ALIKE detections).  Scaled by 3.0.
+
+    Parameters
+    ----------
+    heatmap : Tensor [B, 1, H, W] or [H, W]
+        Predicted keypoint reliability / score map.
+    target : Tensor (same shape)
+        Ground-truth or pseudo-GT target heatmap.
+
+    Returns
+    -------
+    Scalar L1 loss × 3.
+    """
     return F.l1_loss(heatmap, target) * 3.0
 
 
 def hard_triplet_loss(X, Y, margin=0.5):
+    """
+    Hard-negative triplet loss for descriptor learning.
+
+    For each positive pair (X[i], Y[i]), the hardest negative is the closest
+    non-matching descriptor in Y.  Loss = max(0, margin + d_pos - d_neg).
+
+    Parameters
+    ----------
+    X, Y : Tensor [N, C]
+        Descriptor matrices (rows are paired: i-th in X matches i-th in Y).
+    margin : float
+        Triplet margin.
+
+    Returns
+    -------
+    Scalar mean triplet loss.
+    """
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError('Error: X and Y shapes must match and be 2D matrices')
 
@@ -121,6 +264,23 @@ def hard_triplet_loss(X, Y, margin=0.5):
 # =========================
 
 def _skew(t):
+    """
+    Skew-symmetric (cross-product) matrix from a 3-vector.
+
+    Given t = [tx, ty, tz], returns the 3×3 matrix [t]_× such that
+    [t]_× v = t × v  for any vector v.
+
+    Used to build the Essential matrix  E = [t]_× R.
+
+    Parameters
+    ----------
+    t : Tensor (3,) or (3,1) or (1,3)
+        Translation vector.
+
+    Returns
+    -------
+    Tensor [3, 3] — the skew-symmetric matrix.
+    """
     t = t.view(3)
     tx, ty, tz = t[0], t[1], t[2]
     z = torch.zeros_like(tx)
@@ -132,6 +292,25 @@ def _skew(t):
 
 
 def _rot_z(theta):
+    """
+    3×3 rotation matrix about the Z-axis by angle `theta` (radians).
+
+    Rz(θ) = [[cos θ, -sin θ, 0],
+             [sin θ,  cos θ, 0],
+             [0,      0,     1]]
+
+    Used for the circular-rail manifold where the device rotates about
+    the device Z-axis.
+
+    Parameters
+    ----------
+    theta : scalar Tensor
+        Rotation angle in radians.
+
+    Returns
+    -------
+    Tensor [3, 3] — rotation matrix.
+    """
     c = torch.cos(theta)
     s = torch.sin(theta)
     z = torch.zeros_like(c)
@@ -144,6 +323,18 @@ def _rot_z(theta):
 
 
 def _to_h(x):
+    """
+    Convert 2D points to homogeneous coordinates by appending a column of ones.
+
+    Parameters
+    ----------
+    x : Tensor [N, 2]
+        2D pixel coordinates.
+
+    Returns
+    -------
+    Tensor [N, 3] — homogeneous coordinates [u, v, 1].
+    """
     ones = torch.ones((x.shape[0], 1), device=x.device, dtype=x.dtype)
     return torch.cat([x, ones], dim=1)
 
@@ -157,6 +348,29 @@ def normalize_points_with_K(x_px, K):
 
 
 def sampson_error(x1n_h, x2n_h, E, eps=1e-8):
+    """
+    Sampson distance (first-order approximation to geometric/reprojection error).
+
+    For calibrated homogeneous points x1, x2 and Essential matrix E:
+
+        d_Sampson = (x2^T E x1)^2 / ( (Ex1)[0]^2 + (Ex1)[1]^2 + (E^Tx2)[0]^2 + (E^Tx2)[1]^2 )
+
+    A point pair lying exactly on its epipolar line gives d=0.
+    This is scale-invariant in E (numerator and denominator both scale as α²).
+
+    Parameters
+    ----------
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous coordinates (i.e. K^{-1} [u,v,1]^T) for images 1 and 2.
+    E : Tensor [3, 3]
+        Essential matrix relating the two views.
+    eps : float
+        Small constant to avoid division by zero.
+
+    Returns
+    -------
+    Tensor [N] — per-point Sampson error (non-negative).
+    """
     Ex1 = (E @ x1n_h.t()).t()
     Etx2 = (E.t() @ x2n_h.t()).t()
     x2tEx1 = torch.sum(x2n_h * Ex1, dim=1)
@@ -165,11 +379,54 @@ def sampson_error(x1n_h, x2n_h, E, eps=1e-8):
 
 
 def robust_charbonnier(x, eps=1e-6):
+    """
+    Charbonnier robust kernel:  ρ(x) = √(x + ε²).
+
+    A smooth, differentiable approximation to √x that avoids the singularity
+    at x=0.  Sub-linear growth makes it robust to outlier residuals — large
+    errors are down-weighted relative to MSE.
+
+    Parameters
+    ----------
+    x : Tensor
+        Non-negative residual values (e.g. Sampson errors).
+    eps : float
+        Smoothing constant (default 1e-6).
+
+    Returns
+    -------
+    Tensor (same shape) — robustified residuals.
+    """
     return torch.sqrt(x + eps*eps)
 
 
 def weighted_8point_essential(x1n_h, x2n_h, w, eps=1e-8):
-    """Weighted 8-point Essential estimate in calibrated coords. Autograd-safe."""
+    """
+    Weighted 8-point algorithm for Essential matrix estimation.
+
+    Constructs the Kronecker-product data matrix A from calibrated point
+    pairs, weights each row by sqrt(w), then solves for E via SVD.
+    The result is projected onto the Essential manifold by enforcing
+    singular values (s, s, 0).
+
+    This is an "unconstrained" estimate (no manifold prior) used by the
+    deviation loss to compare against the rail-constrained E.
+
+    Fully autograd-safe: gradients flow through w and point coordinates.
+
+    Parameters
+    ----------
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous point correspondences.
+    w : Tensor [N]
+        Per-correspondence weights (non-negative).
+    eps : float
+        Numerical stability constant.
+
+    Returns
+    -------
+    Tensor [3, 3] — estimated Essential matrix (unit norm).
+    """
     N = x1n_h.shape[0]
     if N < 8:
         return torch.eye(3, device=x1n_h.device, dtype=x1n_h.dtype)
@@ -243,6 +500,32 @@ def essential_from_circular_phi(phi, rail_radius, r_cd, t_cd):
 
 
 def _circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd):
+    """
+    Evaluate the weighted robust Sampson cost at a given angle phi on the circular rail.
+
+    Builds E(phi) from the circular-rail geometry, computes per-match Sampson
+    errors, applies the Charbonnier kernel, and returns the weighted sum:
+        J(phi) = sum_m  w_m * rho( d_Sampson(x1_m, x2_m, E(phi)) )
+
+    Parameters
+    ----------
+    phi : scalar Tensor
+        Rail angle (radians).
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous correspondences.
+    w : Tensor [N]
+        Match weights.
+    rho_eps : float
+        Charbonnier epsilon.
+    rail_radius : float
+        Radius R of the circular rail.
+    r_cd, t_cd : Tensor
+        Camera-to-device extrinsics.
+
+    Returns
+    -------
+    Scalar Tensor — the cost J(phi).
+    """
     E = essential_from_circular_phi(phi, rail_radius, r_cd, t_cd)
     r = sampson_error(x1n_h, x2n_h, E)
     return torch.sum(w * robust_charbonnier(r, eps=rho_eps))
@@ -255,6 +538,44 @@ def solve_phi_circular(x1n_h, x2n_h, w,
                        rho_eps=1e-6,
                        rail_radius=1.0,
                        r_cd=None, t_cd=None):
+    """
+    Solve for the optimal rail angle phi* on the circular manifold.
+
+    Two-stage optimisation under torch.no_grad() (stop-grad):
+      1. **Coarse grid search**: evaluate J(phi) on a uniform grid of
+         `coarse_steps` values in [phi_min, phi_max] and pick the minimum.
+      2. **Gauss–Newton refinement**: `gn_steps` iterations of finite-difference
+         Newton updates  phi <- phi - g/H  (clamped to [phi_min, phi_max]).
+
+    Because this runs under no_grad, the *location* phi* does not carry
+    gradients.  Gradients flow only through the final cost evaluation
+    (via the match weights w).
+
+    Parameters
+    ----------
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous correspondences.
+    w : Tensor [N]
+        Match weights (from soft or hard extraction).
+    phi_min, phi_max : float
+        Search bounds for the rail angle (radians).
+    coarse_steps : int
+        Number of grid points for the coarse search.
+    gn_steps : int
+        Number of Gauss–Newton refinement iterations.
+    rho_eps : float
+        Charbonnier kernel epsilon.
+    rail_radius : float
+        Circular rail radius R.
+    r_cd, t_cd : Tensor
+        Camera→device extrinsics.
+
+    Returns
+    -------
+    phi : scalar Tensor    — optimal angle.
+    E   : Tensor [3, 3]   — Essential matrix at phi*.
+    J   : scalar Tensor    — cost at phi*.
+    """
     device, dtype = x1n_h.device, x1n_h.dtype
     grid = torch.linspace(phi_min, phi_max, steps=int(coarse_steps), device=device, dtype=dtype)
     costs = torch.stack([_circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd) for phi in grid])
@@ -297,6 +618,30 @@ def essential_from_linear_sideways(r_cd, sign=+1.0):
 
 
 def _linear_objective(sign, x1n_h, x2n_h, w, rho_eps, r_cd):
+    """
+    Evaluate the weighted robust Sampson cost for the linear rail at a given sign.
+
+    The linear rail has no rotation (R_ji = I) and translation direction
+    t_dev = sign * [1,0,0]^T.  Only two possible Essential matrices exist
+    (sign=+1 or sign=-1).
+
+    Parameters
+    ----------
+    sign : float (+1.0 or -1.0)
+        Translation direction sign.
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous correspondences.
+    w : Tensor [N]
+        Match weights.
+    rho_eps : float
+        Charbonnier kernel epsilon.
+    r_cd : Tensor [3, 3]
+        Camera→device rotation.
+
+    Returns
+    -------
+    Scalar Tensor — the cost J(sign).
+    """
     E = essential_from_linear_sideways(r_cd, sign=sign)
     r = sampson_error(x1n_h, x2n_h, E)
     return torch.sum(w * robust_charbonnier(r, eps=rho_eps))
@@ -304,6 +649,33 @@ def _linear_objective(sign, x1n_h, x2n_h, w, rho_eps, r_cd):
 
 @torch.no_grad()
 def solve_linear_sign(x1n_h, x2n_h, w, rho_eps=1e-6, r_cd=None, allow_both=True):
+    """
+    Solve for the optimal translation sign on the linear rail.
+
+    Since the linear rail has only two possible Essential matrices (sign=+1
+    and sign=-1), this is a discrete exhaustive search (no optimisation loop).
+    Runs under torch.no_grad() (stop-grad) so the chosen sign does not
+    carry gradients; gradients flow only through the final cost via w.
+
+    Parameters
+    ----------
+    x1n_h, x2n_h : Tensor [N, 3]
+        Calibrated homogeneous correspondences.
+    w : Tensor [N]
+        Match weights.
+    rho_eps : float
+        Charbonnier kernel epsilon.
+    r_cd : Tensor [3, 3]
+        Camera→device rotation.
+    allow_both : bool
+        If True, evaluate both signs and pick the best.  If False, assume +1.
+
+    Returns
+    -------
+    sign : scalar Tensor (+1 or -1)
+    E    : Tensor [3, 3]
+    J    : scalar Tensor (cost at the chosen sign)
+    """
     if not allow_both:
         sign = torch.tensor(1.0, device=x1n_h.device, dtype=x1n_h.dtype)
         E = essential_from_linear_sideways(r_cd, sign=1.0)
@@ -477,6 +849,26 @@ def extract_xfeat_matches_soft(f1, f2, h1, h2, topk=1024, tau=0.1, dust_bin=True
 # =========================
 
 def _weighted_entropy(w, eps=1e-8):
+    """
+    Shannon entropy of the normalised weight distribution.
+
+    H(w) = - sum_m  p_m log(p_m),   where p_m = w_m / sum(w)
+
+    Higher entropy means weights are more uniformly spread across matches.
+    Used as a regulariser: maximising entropy discourages the network from
+    collapsing all weight onto a few matches.
+
+    Parameters
+    ----------
+    w : Tensor [M]
+        Non-negative match weights.
+    eps : float
+        Numerical stability constant.
+
+    Returns
+    -------
+    Scalar Tensor — entropy value (non-negative).
+    """
     w = torch.clamp(w, min=0.0)
     p = w / (w.sum() + eps)
     p = torch.clamp(p, min=eps)
@@ -484,6 +876,34 @@ def _weighted_entropy(w, eps=1e-8):
 
 
 def _coverage_entropy(x_px, w, img_h, img_w, bins=8, eps=1e-8):
+    """
+    Spatial coverage entropy of match locations.
+
+    Divides the image into a bins×bins grid.  For each cell, accumulates the
+    total match weight landing in that cell, normalises to a probability
+    distribution, and computes its Shannon entropy.
+
+    Higher entropy means matches are spread across the image rather than
+    clustered in one region.  Used as a regulariser (subtracted from loss
+    → maximise entropy → encourage spatial spread).
+
+    Parameters
+    ----------
+    x_px : Tensor [M, 2]
+        Match coordinates in pixel space (x, y).
+    w : Tensor [M]
+        Per-match weights.
+    img_h, img_w : int
+        Image height and width in pixels.
+    bins : int
+        Number of spatial bins per axis.
+    eps : float
+        Numerical stability constant.
+
+    Returns
+    -------
+    Scalar Tensor — spatial entropy value.
+    """
     if x_px.numel() == 0:
         return torch.zeros((), device=x_px.device, dtype=x_px.dtype)
     bins = max(int(bins), 2)
@@ -530,12 +950,62 @@ def rail_self_supervision_loss(
     lin_allow_both_signs: bool = True,
 ):
     """
-    Returns:
-      J_manifold, L_dev, J_free, reg, aux_param, E_manifold
+    Unified rail self-supervision loss (supports circular and linear manifolds).
 
-    aux_param:
-      - circular: phi*
-      - linear: sign (+1/-1)
+    This is the main entry point called from the training loop.  Given matched
+    pixel coordinates and weights (from either Phase-1 hard or Phase-2 soft
+    extraction), it:
+
+      1. Converts pixel coords to calibrated homogeneous coords via K^{-1}.
+      2. Solves for the optimal manifold parameter (phi* or sign*) under
+         stop-grad so the solver itself doesn't inject gradients.
+      3. Computes the manifold cost J_manifold = sum w_m rho(d_Sampson(...)).
+      4. Optionally computes the deviation loss: L_dev = log(J_manifold) - log(J_free)
+         where J_free uses an unconstrained weighted 8-point Essential estimate.
+      5. Optionally adds entropy + spatial-coverage regularisers.
+
+    Gradients flow through w (and through x2_px in Phase-2 soft mode) back
+    into the descriptor and heatmap branches of the network.
+
+    Parameters
+    ----------
+    mode : str
+        'circular' or 'linear'.
+    x1_px, x2_px : Tensor [M, 2]
+        Matched pixel coordinates in images 1 and 2.
+    w : Tensor [M]
+        Per-match weights (normalised, has grad).
+    k0, k1 : Tensor [3, 3]
+        Camera intrinsic matrices for images 0 and 1.
+    img_h, img_w : int
+        Image dimensions (for coverage entropy binning).
+    rho_eps : float
+        Charbonnier kernel epsilon.
+    use_dev : bool
+        Whether to compute the deviation loss L_dev.
+    lambda_entropy, lambda_coverage : float
+        Weights for the entropy and spatial-coverage regularisers.
+    coverage_bins : int
+        Number of spatial bins per axis for coverage entropy.
+    phi_min, phi_max : float
+        Circular-rail search bounds (radians).
+    phi_grid_steps, gn_steps : int
+        Circular solver parameters (grid density, Newton steps).
+    rail_radius : float
+        Circular-rail radius R.
+    r_cd, t_cd : Tensor
+        Camera→device extrinsics.
+    lin_allow_both_signs : bool
+        Whether the linear solver tries both +X and -X.
+
+    Returns
+    -------
+    J_manifold  : scalar Tensor  — manifold cost (main rail loss).
+    L_dev       : scalar Tensor  — deviation loss (0 if use_dev=False).
+    J_free      : scalar Tensor  — unconstrained cost (0 if use_dev=False).
+    reg         : scalar Tensor  — combined regulariser term.
+    aux_param   : scalar Tensor  — solved manifold parameter (phi* or sign*).
+    E_manifold  : Tensor [3, 3]  — Essential matrix at the solution.
     """
     if k0 is None or k1 is None:
         raise ValueError("[RailLoss] Intrinsics k0 and k1 are required for Essential-based rail losses.")
