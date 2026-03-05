@@ -592,6 +592,114 @@ Both are \textbf{subtracted} from the loss (maximizing entropy = encouraging spr
 \end{frame}
 
 % ================================================================
+\section{Phase 2: Soft-Assignment Matching}
+% ================================================================
+
+\begin{frame}{Phase 2 --- Dual-Softmax Soft Assignment}
+\small
+\textbf{Phase 1 limitation:} Match coordinates are selected via \texttt{topk}/\texttt{argmax}
+--- a \emph{hard}, non-differentiable operation.  Gradients reach the network
+only through match \emph{weights} $w_m$.
+
+\smallskip
+\textbf{Phase 2 upgrade:} Replace hard selection with a \textbf{dual-softmax soft
+assignment} matrix, so match coordinates become \emph{differentiable expectations}:
+
+\vspace{-0.3em}
+\[
+    P = \mathrm{softmax}\!\bigl(S/\tau,\;\text{dim}=1\bigr)
+      \;\odot\;
+      \mathrm{softmax}\!\bigl(S/\tau,\;\text{dim}=0\bigr),
+    \qquad S = D_1 D_2^\top
+\]
+\vspace{-0.8em}
+
+For each keypoint $i$ in image 1, the \textbf{soft match coordinate} in image 2 is:
+\vspace{-0.3em}
+\[
+    \tilde{\mathbf{x}}^{(2)}_i = \sum_{j} P_{ij} \; \mathbf{x}^{(2)}_j
+    \qquad \text{(weighted average over all candidates)}
+\]
+\vspace{-0.5em}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item $\tilde{\mathbf{x}}^{(2)}_i$ is differentiable w.r.t.\ descriptors
+          $\Rightarrow$ gradients flow through \textbf{both} coordinates \emph{and} weights.
+    \item Temperature $\tau$ controls sharpness: low $\tau \to$ nearly hard selection.
+    \item \textbf{Stronger learning signal}: the network receives direct feedback on
+          \emph{where} it places matches, not just \emph{how much} it trusts them.
+\end{itemize}
+\end{frame}
+
+% ================================================================
+\begin{frame}{Phase 1 vs.\ Phase 2 --- Gradient Flow Comparison}
+\small
+\begin{columns}[T]
+\column{0.48\textwidth}
+\begin{center}
+\textbf{Phase 1 (current)}\\[0.3em]
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum height=0.55cm, minimum width=1.8cm,
+                align=center, font=\scriptsize},
+    >=Stealth, scale=0.72, transform shape
+]
+\node[box, fill=blue!15]   (net1)   at (0, 0)   {XFeat $\theta$};
+\node[box, fill=green!15]  (feat1)  at (0,-1.3)  {$F$, $h$};
+\node[box, fill=orange!15] (coord1) at (-1.5,-2.8) {Coords\\(\texttt{topk})};
+\node[box, fill=green!15]  (w1)     at (1.5,-2.8) {Weights\\$w_m$};
+\node[box, fill=red!15]    (loss1)  at (0,-4.2) {$J_{\mathrm{manifold}}$};
+
+\draw[->] (net1)  -- (feat1);
+\draw[->] (feat1) -- (coord1);
+\draw[->] (feat1) -- (w1);
+\draw[->, gray, dashed] (coord1) -- (loss1) node[midway, left, font=\tiny]{no grad};
+\draw[->, thick, green!60!black] (w1)  -- (loss1) node[midway, right, font=\tiny]{grad};
+\draw[->, thick, red, dashed] (loss1.west) -- ++(-1.2,0) |- (net1.west)
+    node[pos=0.45, left, font=\tiny, text width=1.2cm, align=center]{$\nabla$ via\\$w$ only};
+\end{tikzpicture}
+\end{center}
+
+\column{0.48\textwidth}
+\begin{center}
+\textbf{Phase 2 (soft assignment)}\\[0.3em]
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum height=0.55cm, minimum width=1.8cm,
+                align=center, font=\scriptsize},
+    >=Stealth, scale=0.72, transform shape
+]
+\node[box, fill=blue!15]   (net2)   at (0, 0)   {XFeat $\theta$};
+\node[box, fill=green!15]  (feat2)  at (0,-1.3)  {$F$, $h$};
+\node[box, fill=green!15]  (coord2) at (-1.5,-2.8) {Soft coords\\$\tilde{\mathbf{x}}$};
+\node[box, fill=green!15]  (w2)     at (1.5,-2.8) {Weights\\$w_m$};
+\node[box, fill=red!15]    (loss2)  at (0,-4.2) {$J_{\mathrm{manifold}}$};
+
+\draw[->] (net2)  -- (feat2);
+\draw[->] (feat2) -- (coord2);
+\draw[->] (feat2) -- (w2);
+\draw[->, thick, green!60!black] (coord2) -- (loss2) node[midway, left, font=\tiny]{\textbf{grad}};
+\draw[->, thick, green!60!black] (w2)  -- (loss2) node[midway, right, font=\tiny]{grad};
+\draw[->, thick, red, dashed] (loss2.east) -- ++(1.2,0) |- (net2.east)
+    node[pos=0.45, right, font=\tiny, text width=1.3cm, align=center]{$\nabla$ via\\$w$ \textbf{+} coords};
+\end{tikzpicture}
+\end{center}
+\end{columns}
+
+\vspace{0.5em}
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Phase 1} & \textbf{Phase 2} \\
+\midrule
+Match selection        & Hard (\texttt{topk})          & Soft (dual-softmax) \\
+Coord differentiable?  & \textcolor{red}{No}           & \textcolor{green!60!black}{\textbf{Yes}} \\
+Gradient paths         & Weights only                  & Weights + Coordinates \\
+Signal strength        & Indirect                      & Direct \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{frame}
+
+% ================================================================
 \section{Summary}
 % ================================================================
 
@@ -608,8 +716,10 @@ Both are \textbf{subtracted} from the loss (maximizing entropy = encouraging spr
               Essential matrix $E = [\Rcd \cdot s\mathbf{e}_1]_\times$.
     \end{itemize}
     \item The loss uses \textbf{Sampson error} with a \textbf{Charbonnier robust kernel}.
-    \item Gradients flow through \textbf{match weights only} (descriptors + heatmaps),
-          not through match coordinates or the inner solver.
+    \item \textbf{Phase 1:} Gradients flow through match weights only
+          (hard coordinate selection).
+    \item \textbf{Phase 2:} Dual-softmax soft assignment makes coordinates differentiable
+          $\Rightarrow$ stronger gradient signal through both weights \emph{and} coordinates.
     \item Optional \textbf{deviation loss} and \textbf{entropy regularizers} provide
           additional training signal.
 \end{enumerate}
