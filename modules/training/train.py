@@ -440,6 +440,11 @@ if __name__ == "__main__":
 #   --rail_k0 "fx,0,cx,0,fy,cy,0,0,1" \
 #   --rail_k1 "fx,0,cx,0,fy,cy,0,0,1"
 
+
+#phase 2
+# ## python -m modules.training.train --rail_lambda 1.0 --rail_tau 0.1 ...
+
+
 #linear
 # python -m modules.training.train \
 #   --training_type xfeat_default \
