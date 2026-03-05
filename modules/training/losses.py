@@ -6,10 +6,12 @@ from modules.training import utils
 from third_party.alike_wrapper import extract_alike_kpts
 
 """
-PHASE-1:
-- Hard selection for match coordinates (topk/argmax): not differentiable wrt *which* points are chosen.
-- BUT match weights w are NOT detached => gradients flow through descriptor similarity and selected heatmap values.
-- Inner solver (phi*) stop-grad for stability.
+PHASE-2 (Soft-Assignment):
+- Dual-softmax soft assignment: match coordinates are differentiable expectations
+  over the assignment matrix P, so gradients flow through BOTH weights AND coordinates.
+- P = softmax(S/tau, dim=1) * softmax(S/tau, dim=0),  S = D1 @ D2^T
+- Soft match coordinate:  x_tilde_j = sum_j P_ij * x_j  (weighted average)
+- Inner solver (phi*) still stop-grad for stability.
 - Intrinsics K are REQUIRED for Essential-based losses (calibrated coordinates).
 - Supports two manifolds:
     * circular rail  : 1D parameter phi
@@ -320,11 +322,12 @@ def solve_linear_sign(x1n_h, x2n_h, w, rho_eps=1e-6, r_cd=None, allow_both=True)
 
 
 # =========================
-# Match extraction (hard coords, differentiable weights)
+# Match extraction — Phase 1 (hard coords, differentiable weights)  [KEPT FOR REFERENCE]
 # =========================
 
 def extract_xfeat_matches(f1, f2, h1, h2, topk=1024, min_cos=0.1):
     """
+    Phase-1 hard extraction. Kept for compatibility / evaluation.
     f1,f2: [C,H,W]
     h1,h2: [H,W]
     Returns:
@@ -379,6 +382,94 @@ def extract_xfeat_matches(f1, f2, h1, h2, topk=1024, min_cos=0.1):
     w_out = torch.clamp(w_out, min=0.0)
     w_out = w_out / (w_out.sum() + 1e-8)
     return x1, x2, w_out
+
+
+# =========================
+# Match extraction — Phase 2 (soft-assignment, fully differentiable)
+# =========================
+
+def extract_xfeat_matches_soft(f1, f2, h1, h2, topk=1024, tau=0.1, dust_bin=True):
+    """
+    Phase-2 soft-assignment extraction.  Gradients flow through BOTH
+    match coordinates (via the soft expectation) AND match weights.
+
+    f1,f2 : [C, H, W]  — dense descriptor feature maps
+    h1,h2 : [H, W]     — heatmaps / reliability maps
+    topk  : int         — number of source keypoints (selected by heatmap score)
+    tau   : float       — softmax temperature (lower = sharper; 0.1 is a good start)
+    dust_bin : bool     — if True, append a learned-free dustbin row/col so that poor
+                          matches can be "explained away" instead of forced onto a target.
+
+    Returns
+    -------
+    x1_soft : [M, 2]   soft source coords in feature-map space (x, y).  These are the
+                        *hard* topk locations (no grad through them — they define the
+                        query set).
+    x2_soft : [M, 2]   soft target coords — differentiable expectations over all
+                        candidate locations in image 2, weighted by the assignment row.
+    w       : [M]      match weight per pair (normalized, has grad).
+    """
+    C, H, W = f1.shape
+    n = H * W
+    k = min(int(topk), n)
+    if k <= 0:
+        empty = torch.empty((0, 2), device=f1.device, dtype=torch.float32)
+        return empty, empty, torch.empty((0,), device=f1.device, dtype=f1.dtype)
+
+    # -- Dense descriptors (L2-normalised) & heatmap scores ---------------
+    d1 = F.normalize(f1.view(C, -1).t(), dim=-1)   # [N1, C]
+    d2 = F.normalize(f2.view(C, -1).t(), dim=-1)   # [N2, C]
+    r1 = h1.reshape(-1)                              # [N1]
+    r2 = h2.reshape(-1)                              # [N2]
+
+    # -- Select top-k keypoints from heatmaps ----------------------------
+    i1 = torch.topk(r1, k=k, dim=0).indices          # [k]
+    i2 = torch.topk(r2, k=k, dim=0).indices          # [k]
+    d1k = d1[i1]                                      # [k, C]
+    d2k = d2[i2]                                      # [k, C]
+    r1k = r1[i1]                                      # [k]
+    r2k = r2[i2]                                      # [k]
+
+    # -- Cosine similarity matrix ----------------------------------------
+    S = d1k @ d2k.t()                                 # [k, k]
+
+    # -- Dual softmax (transport-like) assignment -------------------------
+    # P_ij = softmax(S/tau, dim=1)_ij  *  softmax(S/tau, dim=0)_ij
+    logits = S / tau
+    if dust_bin:
+        # Append a dustbin column and row with score 0 (acts as "unmatched").
+        # This lets the softmax assign low-confidence queries to the dustbin
+        # instead of forcing them onto a real target.
+        dust_col = torch.zeros(k, 1, device=S.device, dtype=S.dtype)
+        dust_row = torch.zeros(1, k + 1, device=S.device, dtype=S.dtype)
+        logits_aug = torch.cat([logits, dust_col], dim=1)      # [k, k+1]
+        logits_aug = torch.cat([logits_aug, dust_row], dim=0)  # [k+1, k+1]
+        P_aug = F.softmax(logits_aug, dim=1) * F.softmax(logits_aug, dim=0)
+        P = P_aug[:k, :k]                                      # [k, k]
+    else:
+        P = F.softmax(logits, dim=1) * F.softmax(logits, dim=0)  # [k, k]
+
+    # -- Candidate coordinates in feature-map space ----------------------
+    # x2_cand[j] = (ix, iy) for the j-th selected keypoint in image 2
+    x2_cand = torch.stack([i2 % W, i2 // W], dim=1).to(f1.dtype)  # [k, 2]
+
+    # -- Soft target coordinates: expectation over assignment row ---------
+    # x2_soft[i] = sum_j  P[i,j] * x2_cand[j]  /  sum_j P[i,j]
+    row_sum = P.sum(dim=1, keepdim=True).clamp(min=1e-8)  # [k, 1]
+    P_norm = P / row_sum                                   # [k, k]
+    x2_soft = P_norm @ x2_cand                             # [k, 2]  <-- differentiable!
+
+    # -- Source coordinates (hard, defines query set) --------------------
+    x1_hard = torch.stack([i1 % W, i1 // W], dim=1).to(torch.float32)  # [k, 2]
+
+    # -- Match weights: assignment confidence * heatmap scores -----------
+    # confidence = max assignment value per row (how peaked the assignment is)
+    conf = P.max(dim=1).values                              # [k]
+    w_out = torch.clamp(conf, min=0.0) * torch.clamp(r1k, min=0.0) * torch.clamp(r2k[P.argmax(dim=1)], min=0.0)
+    w_out = torch.clamp(w_out, min=0.0)
+    w_out = w_out / (w_out.sum() + 1e-8)
+
+    return x1_hard, x2_soft, w_out
 
 
 # =========================

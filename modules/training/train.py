@@ -31,6 +31,7 @@ from modules.training.losses import (
     alike_distill_loss,
     keypoint_loss,
     extract_xfeat_matches,
+    extract_xfeat_matches_soft,
     rail_self_supervision_loss,
 )
 from modules.training import utils
@@ -83,6 +84,10 @@ def parse_arguments():
     p.add_argument('--rail_min_matches', type=int, default=64)
     p.add_argument('--rail_topk', type=int, default=1024)
     p.add_argument('--rail_min_cos', type=float, default=0.1)
+    p.add_argument('--rail_tau', type=float, default=0.1,
+                   help='Softmax temperature for Phase-2 soft assignment (lower = sharper).')
+    p.add_argument('--rail_hard_matching', action='store_true',
+                   help='Fall back to Phase-1 hard matching instead of Phase-2 soft assignment.')
 
     # circular params
     p.add_argument('--rail_phi_min', type=float, default=-0.35)
@@ -335,10 +340,18 @@ class Trainer:
                 feats_r0, _, hmap_r0 = self.net(rail0)
                 feats_r1, _, hmap_r1 = self.net(rail1)
 
-                x0_f, x1_f, w = extract_xfeat_matches(
-                    feats_r0[0], feats_r1[0], hmap_r0[0, 0], hmap_r1[0, 0],
-                    topk=self.args.rail_topk, min_cos=self.args.rail_min_cos
-                )
+                if self.args.rail_hard_matching:
+                    # Phase-1: hard topk + MNN (no coord gradient)
+                    x0_f, x1_f, w = extract_xfeat_matches(
+                        feats_r0[0], feats_r1[0], hmap_r0[0, 0], hmap_r1[0, 0],
+                        topk=self.args.rail_topk, min_cos=self.args.rail_min_cos
+                    )
+                else:
+                    # Phase-2: dual-softmax soft assignment (coord + weight grads)
+                    x0_f, x1_f, w = extract_xfeat_matches_soft(
+                        feats_r0[0], feats_r1[0], hmap_r0[0, 0], hmap_r1[0, 0],
+                        topk=self.args.rail_topk, tau=self.args.rail_tau
+                    )
 
                 # Feature-map -> pixel coords
                 sy0 = rail0.shape[-2] / feats_r0.shape[-2]
