@@ -194,9 +194,8 @@ class Trainer():
         self.rail_r_cd = torch.eye(3, dtype=torch.float32, device=self.dev)
         self.rail_t_cd = torch.zeros(3, dtype=torch.float32, device=self.dev)
         if device_calib_path:
-            # Load ombc/tbc (body->camera Rodrigues extrinsics) from the SFConfig block and
-            # convert to camera->device (R_cd, t_cd) using:
-            #   R_cd = R_bc^T,   t_cd = -R_bc^T @ t_bc
+            # Load ombc/tbc (camera-in-body extrinsics) from <SFConfig>.
+            # Since device = body: R_cd = Rbc, t_cd = tbc (no inversion needed).
             _r_cd_np, _t_cd_np = load_rail_extrinsics_from_calib(
                 device_calib_path,
                 imu_name=imu_name if imu_name else None

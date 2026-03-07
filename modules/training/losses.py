@@ -395,16 +395,17 @@ def _rodrigues_to_matrix_np(rvec):
 def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
     """
     Load camera-to-device extrinsics (R_cd, t_cd) from a device_calibration.xml.
-    The ``<SFConfig><Stateinit>`` block stores the IMU/body-to-camera extrinsics:
-        ombc  - Rodrigues angle-axis rotation vector, BODY→CAMERA
-                p_cam = R_bc @ p_body + t_bc   where R_bc = rodrigues(ombc)
-        tbc   - translation, BODY origin → CAMERA origin, expressed in BODY frame
+    The ``<SFConfig><Stateinit>`` block stores camera-in-body extrinsics:
+        ombc  - Rodrigues angle-axis rotation vector, CAMERA→BODY (camera in body)
+                p_body = R_bc @ p_cam + t_bc   where R_bc = rodrigues(ombc)
+        tbc   - translation, camera origin expressed in BODY frame
     Device frame convention (as per hardware spec):
         X = up,  Y = left,  Z = inward (into the scene)
     Rail plane is the ZY plane.
-    This function converts the BODY→CAMERA convention to CAMERA→DEVICE:
-        R_cd = R_bc^T
-        t_cd = -R_bc^T @ t_bc
+    Since device = body, the camera-in-body extrinsics are directly
+    camera→device:
+        R_cd = R_bc       (= rodrigues(ombc))
+        t_cd = t_bc
     Parameters
     ----------
     device_calib_path : str
@@ -437,10 +438,10 @@ def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
             f"{device_calib_path}.  Available keys: {list(params.keys())}"
         )
     imu = params[key]
-    ombc = np.array(imu['ombc'], dtype=np.float64).ravel()   # Rodrigues rotation, BODY->CAM
-    tbc  = np.array(imu['tbc'],  dtype=np.float64).ravel()   # translation, BODY->CAM in BODY frame
-    Rbc = _rodrigues_to_matrix_np(ombc)   # body->camera rotation (3x3)
-    # Camera->device (body):
+    ombc = np.array(imu['ombc'], dtype=np.float64).ravel()   # Rodrigues rotation, CAM→BODY
+    tbc  = np.array(imu['tbc'],  dtype=np.float64).ravel()   # cam origin in body frame
+    Rbc = _rodrigues_to_matrix_np(ombc)   # cam→body rotation (3x3)
+    # Camera→device (device = body, so R_cd = Rbc, t_cd = tbc):
     R_cd = Rbc
     t_cd = tbc
     print(f"[Rail] Loaded extrinsics from '{device_calib_path}' (key='{key}')")
@@ -465,25 +466,33 @@ def _cam_to_dev_to_dev_to_cam(r_cd, t_cd):
 def essential_from_circular_phi(phi, rail_radius, r_cd, t_cd):
     """
     Circular rail in the device ZY plane (device frame: X=up, Y=left, Z=inward).
-    Extrinsics are CAM->DEV (R_cd, t_cd).  Internally uses DEV->CAM (R_dc, t_dc).
+    Extrinsics are CAM->DEV: p_dev = R_cd @ p_cam + t_cd.
+
     The device rotates about the X axis ("up" direction) because the rail
     lies in the ZY plane.  The reference position in device coords is:
         p0 = [0, 0, R]^T   (along +Z = inward, at angle phi=0)
-    E(phi) = [t_ji]_x R_ji  with:
-      R_ji = R_dc^T  Rx(-phi)  R_dc
-      t_ji = R_dc^T ( Rx(-phi)p0 - p0 + (Rx(-phi)-I) t_dc )
+
+    Camera-i world pose: R_w_ci = R_cd,          C_wi = t_cd + p0
+    Camera-j world pose: R_w_cj = Rx(phi) @ R_cd, C_wj = Rx(phi) @ (t_cd + p0)
+
+    Relative pose (j→i in camera-j frame):
+      R_ji = R_cd^T @ Rx(-phi) @ R_cd
+      t_ji = R_cd^T @ (Rx(-phi) - I) @ (t_cd + p0)
+
+    E(phi) = [t_ji]_x @ R_ji
     """
     device, dtype = phi.device, phi.dtype
     r_cd = r_cd.to(device=device, dtype=dtype).view(3, 3)
     t_cd = t_cd.to(device=device, dtype=dtype).view(3)
-    r_dc, t_dc = _cam_to_dev_to_dev_to_cam(r_cd, t_cd)
     # Rotate about X axis (rail in ZY plane, X=up is the rotation axis)
     rx = _rot_x(-phi)
-    r_ji = r_dc.t() @ rx @ r_dc
+    # R_ji in camera frame
+    r_ji = r_cd.t() @ rx @ r_cd
     # Reference position in device frame: on the +Z axis at distance rail_radius
     p0 = torch.tensor([0.0, 0.0, rail_radius], device=device, dtype=dtype)
     I = torch.eye(3, device=device, dtype=dtype)
-    t_ji = r_dc.t() @ (rx @ p0 - p0 + (rx - I) @ t_dc)
+    # t_ji in camera frame: R_cd^T brings (Rx(-phi)-I)(t_cd+p0) from device→camera
+    t_ji = r_cd.t() @ (rx - I) @ (t_cd + p0)
     return _skew(t_ji) @ r_ji
 def _circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd):
     """
@@ -537,22 +546,23 @@ def essential_from_linear_sideways(r_cd, sign=+1.0):
     The device translates sideways along the device +Y axis (Y=left/right).
     Orientation is fixed: R_ji = I.
       t_dev ∝ sign * [0, 1, 0]^T   (along Y = left)
-    With CAM->DEV rotation R_cd:
-      t_cam = R_cd @ t_dev   (since R_dc = R_cd^T, R_dc^T = R_cd)
+    With CAM->DEV extrinsics (p_dev = R_cd p_cam + t_cd):
+      t_cam = R_cd^T @ t_dev   (R_cd^T = R_dc maps device→camera)
       E = [t_cam]_x
     """
     device, dtype = r_cd.device, r_cd.dtype
     r_cd = r_cd.to(device=device, dtype=dtype).view(3, 3)
-    # Translation is along Y (left/right) in the ZY rail plane
+    # Translation is along Y (left/right) in the ZY rail plane.
+    # R_cd^T (= R_dc) brings it from device frame to camera frame.
     t_dev = torch.tensor([0.0, sign, 0.0], device=device, dtype=dtype)
-    t_cam = r_cd @ t_dev
+    t_cam = r_cd.t() @ t_dev
     return _skew(t_cam)
 def _linear_objective(sign, x1n_h, x2n_h, w, rho_eps, r_cd):
     """
     Evaluate the weighted robust Sampson cost for the linear rail at a given sign.
     The linear rail has no rotation (R_ji = I) and translation direction
-    t_dev = sign * [1,0,0]^T. Only two possible Essential matrices exist
-    (sign=+1 or sign=-1).
+    t_dev = sign * [0,1,0]^T (Y axis). Only two possible Essential matrices
+    exist (sign=+1 or sign=-1).
     """
     E = essential_from_linear_sideways(r_cd, sign=sign)
     r = sampson_error(x1n_h, x2n_h, E)

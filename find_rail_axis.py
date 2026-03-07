@@ -28,7 +28,6 @@ RAIL_DATA_PATH = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/L
 DEVICE_CALIB_PATH = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/device_calibration.xml'
 RAIL_CAM_NAME = 'trackingA'
 IMU_NAME = ''
-TRAINING_RES = (800, 608)  # (W, H)
 NUM_PAIRS = 30
 RAIL_VIS_LENGTH = 0.5       # length of rail line in visualisation (metres)
 # ==============================
@@ -220,10 +219,8 @@ def find_rail_axis():
     attempts = 0
     while len(sift_pairs) < NUM_PAIRS and attempts < NUM_PAIRS * 10:
         i0, i1 = random.sample(range(len(paths)), 2)
-        im0 = cv2.resize(cv2.imread(paths[i0], cv2.IMREAD_GRAYSCALE),
-                          TRAINING_RES)
-        im1 = cv2.resize(cv2.imread(paths[i1], cv2.IMREAD_GRAYSCALE),
-                          TRAINING_RES)
+        im0 = cv2.imread(paths[i0], cv2.IMREAD_GRAYSCALE)
+        im1 = cv2.imread(paths[i1], cv2.IMREAD_GRAYSCALE)
         sift = cv2.SIFT_create()
         kp0, des0 = sift.detectAndCompute(im0, None)
         kp1, des1 = sift.detectAndCompute(im1, None)
