@@ -230,7 +230,6 @@ class Trainer():
                     "or --rail_k (pinhole) when rail is enabled."
                 )
             rail_ds = RailDataset(root_dir=rail_data_path,
-                                  training_res=training_res,
                                   length=n_steps)
             self.rail_loader = DataLoader(rail_ds, batch_size=1, shuffle=True)
             self.rail_iter = iter(self.rail_loader)

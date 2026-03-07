@@ -783,6 +783,7 @@ def rail_self_supervision_loss(
     rc = RAIL_DEFAULTS
     if cam is not None:
         # Fisheye-aware undistortion via pycameramodel (any distortion model).
+        # Pixel coords are at native (original) resolution — no rescaling needed.
         x1n_h = normalize_points_with_cam(x1_px, cam)
         x2n_h = normalize_points_with_cam(x2_px, cam)
     elif k0 is not None and k1 is not None:

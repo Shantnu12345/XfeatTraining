@@ -1,6 +1,7 @@
 """
 Rail dataset: loads images from a folder where each image's filename is its timestamp.
-Randomly samples pairs per __getitem__, resizes to training_res, converts to grayscale.
+Randomly samples pairs per __getitem__, converts to grayscale at native resolution
+(padded to a multiple of 32 for XFeat compatibility).
 """
 import os
 import random
@@ -8,28 +9,36 @@ import cv2
 import torch
 from torch.utils.data import Dataset
 _IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+def _pad_to_multiple(img, multiple=32):
+    """Pad a 2-D array (H, W) on the right/bottom so both dims are divisible by *multiple*."""
+    import numpy as np
+    h, w = img.shape[:2]
+    pad_h = (multiple - h % multiple) % multiple
+    pad_w = (multiple - w % multiple) % multiple
+    if pad_h == 0 and pad_w == 0:
+        return img
+    return np.pad(img, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
 class RailDataset(Dataset):
     """
     Dataset that reads all images from *root_dir*, sorts by filename (timestamp),
-    and yields random pairs resized to *training_res* (W, H) as grayscale tensors.
+    and yields random pairs at **native resolution** as grayscale tensors.
+    Images are padded (right/bottom) to the nearest multiple of 32 so that
+    XFeat's stride-32 backbone works without cropping artefacts.
     Each sample is a dict with keys:
-        image0 : Tensor [1, 1, H, W]   (grayscale, float32, [0,1])
+        image0 : Tensor [1, 1, H, W]   (grayscale, uint8)
         image1 : Tensor [1, 1, H, W]
     """
-    def __init__(self, root_dir, training_res=(800, 608), length=1000):
+    def __init__(self, root_dir, length=1000):
         """
         Parameters
         ----------
         root_dir : str
             Folder containing images whose filenames are timestamps.
-        training_res : tuple (W, H)
-            Output resolution to resize images to.
         length : int
             Virtual epoch length (number of pairs per epoch).
         """
         super().__init__()
         self.root_dir = root_dir
-        self.training_res = training_res  # (W, H)
         self.length = length
         # Collect and sort image paths
         all_files = sorted(os.listdir(root_dir))
@@ -45,18 +54,16 @@ class RailDataset(Dataset):
     def __len__(self):
         return self.length
     def _load_image(self, path):
-        """Read, resize to training_res, convert to grayscale uint8 tensor [1,1,H,W]."""
-        w_new, h_new = self.training_res
+        """Read at native resolution, convert to grayscale, pad to mult of 32, return uint8 tensor [1,1,H,W]."""
         im = cv2.imread(path, cv2.IMREAD_COLOR)
         if im is None:
             raise RuntimeError(f"[RailDataset] Could not read image: {path}")
         im_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        # Ensure im_gray is [H,W] and not empty
         if im_gray is None or im_gray.size == 0:
             raise RuntimeError(f"[RailDataset] Grayscale conversion failed for image: {path}")
-        im_gray = cv2.resize(im_gray, (w_new, h_new))
         if im_gray.ndim != 2:
             raise RuntimeError(f"[RailDataset] Grayscale image is not 2D for image: {path}")
+        im_gray = _pad_to_multiple(im_gray, 32)
         t = torch.from_numpy(im_gray).unsqueeze(0).unsqueeze(0)  # [1,1,H,W], uint8
         return t
     def __getitem__(self, idx):
