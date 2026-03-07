@@ -439,10 +439,10 @@ def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
     imu = params[key]
     ombc = np.array(imu['ombc'], dtype=np.float64).ravel()   # Rodrigues rotation, BODY->CAM
     tbc  = np.array(imu['tbc'],  dtype=np.float64).ravel()   # translation, BODY->CAM in BODY frame
-    R_bc = _rodrigues_to_matrix_np(ombc)   # body->camera rotation (3x3)
+    Rbc = _rodrigues_to_matrix_np(ombc)   # body->camera rotation (3x3)
     # Camera->device (body):
-    R_cd = R_bc.T
-    t_cd = -(R_bc.T @ tbc)
+    R_cd = Rbc
+    t_cd = tbc
     print(f"[Rail] Loaded extrinsics from '{device_calib_path}' (key='{key}')")
     print(f"  ombc  = {ombc}")
     print(f"  tbc   = {tbc}")
