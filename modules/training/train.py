@@ -67,6 +67,15 @@ def parse_arguments():
     p.add_argument('--n_steps', type=int, default=160_000)
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--gamma_steplr', type=float, default=0.5)
+    p.add_argument('--pretrained_path', type=str, default='',
+                   help='Optional path to pretrained XFeat weights (.pth) to load before training.')
+
+    # --- Fine-tuning control (train only last layers) ---
+    p.add_argument('--finetune_last_layers', action='store_true',
+                   help='If set, freeze the whole network and train only the modules listed in --finetune_modules.')
+    p.add_argument('--finetune_modules', type=str,
+                   default='block_fusion,heatmap_head,keypoint_head,fine_matcher',
+                   help='Comma-separated list of XFeatModel attribute names to unfreeze when --finetune_last_layers is set.')
     p.add_argument('--training_res', type=lambda s: tuple(map(int, s.split(','))),
                    default=(800, 608), help='Training resolution as width,height.')
     p.add_argument('--device_num', type=str, default='0')
@@ -130,8 +139,43 @@ class Trainer:
         self.dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.net = XFeatModel().to(self.dev)
 
+        if args.pretrained_path:
+            ckpt = torch.load(args.pretrained_path, map_location=self.dev)
+            state_dict = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
+            self.net.load_state_dict(state_dict, strict=False)
+            print(f"[Init] Loaded pretrained weights from: {args.pretrained_path}")
+
         self.batch_size = args.batch_size
         self.steps = args.n_steps
+
+        # ------------------------------
+        # Optional fine-tuning: train only selected (late) modules
+        # ------------------------------
+        if getattr(args, 'finetune_last_layers', False):
+            # Freeze everything
+            for p_ in self.net.parameters():
+                p_.requires_grad = False
+
+            # Unfreeze selected modules by attribute name
+            mod_names = [m.strip() for m in str(args.finetune_modules).split(',') if m.strip()]
+            for name in mod_names:
+                if hasattr(self.net, name):
+                    mod = getattr(self.net, name)
+                    for p_ in mod.parameters():
+                        p_.requires_grad = True
+                else:
+                    print(f"[FineTune] WARNING: XFeatModel has no attribute '{name}'. Skipping.")
+
+            # Prevent BatchNorm running-stat updates when most of the network is frozen
+            for m in self.net.modules():
+                if isinstance(m, torch.nn.BatchNorm2d):
+                    m.eval()
+
+            n_train = sum(p_.numel() for p_ in self.net.parameters() if p_.requires_grad)
+            n_total = sum(p_.numel() for p_ in self.net.parameters())
+            print(f"[FineTune] Trainable params: {n_train}/{n_total} ({100.0*n_train/max(n_total,1):.2f}%)")
+
+        # Optimizer / scheduler (uses only params with requires_grad=True)
         self.opt = optim.Adam(filter(lambda x: x.requires_grad, self.net.parameters()), lr=args.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=30_000, gamma=args.gamma_steplr)
 
