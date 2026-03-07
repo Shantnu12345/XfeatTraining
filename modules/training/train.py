@@ -277,9 +277,18 @@ class Trainer:
 
     def train(self):
         self.net.train()
+        # Keep BatchNorm layers frozen when fine-tuning only last layers
+        if getattr(self.args, 'finetune_last_layers', False):
+            for m in self.net.modules():
+                if isinstance(m, torch.nn.BatchNorm2d):
+                    m.eval()
         pbar = tqdm.tqdm(total=self.steps)
 
         for i in range(self.steps):
+            if getattr(self.args, 'finetune_last_layers', False):
+                for m in self.net.modules():
+                    if isinstance(m, torch.nn.BatchNorm2d):
+                        m.eval()
             # Synthetic
             if self.augmentor is not None:
                 p1s, p2s, H1, H2 = make_batch(self.augmentor, difficulty=0.10)
