@@ -1,0 +1,613 @@
+\documentclass[aspectratio=169, 12pt]{beamer}
+
+% ── Theme & colors ──────────────────────────────────────────────
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+\usepackage{amsmath, amssymb, bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{listings}
+\usetikzlibrary{arrows.meta, positioning, calc}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Rcd}{R_{\mathrm{cd}}}
+\newcommand{\tcd}{\mathbf{t}_{\mathrm{cd}}}
+\newcommand{\Rdc}{R_{\mathrm{dc}}}
+\newcommand{\tdc}{\mathbf{t}_{\mathrm{dc}}}
+\newcommand{\skewmat}[1]{\left[#1\right]_{\times}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+
+\title{Implementation Details\\Rail-Manifold Self-Supervision for XFeat}
+\subtitle{Comprehensive guide for any agent or developer to understand the codebase}
+\author{Shantnu}
+\date{\today}
+
+\begin{document}
+
+% ================================================================
+%  TITLE
+% ================================================================
+\begin{frame}
+\titlepage
+\end{frame}
+
+% ================================================================
+\begin{frame}{Document Purpose}
+\small
+This document captures all \textbf{implementation-level} decisions made while
+extending XFeat with rail-manifold self-supervision.
+
+\medskip
+It is intended as a \textbf{reference for any agent or developer} who needs to
+understand the approach, the coordinate conventions, the data pipeline, and
+the training strategies --- without reading every line of code.
+
+\medskip
+\textbf{Companion document:} \texttt{rail\_self\_supervision.tex} contains the
+conceptual / mathematical formulation.  This file focuses on \emph{what was
+implemented and why}.
+
+\medskip
+\tableofcontents
+\end{frame}
+
+
+% ================================================================
+\section{1. Circular Rail: Rotation Axis = Device X (Up)}
+% ================================================================
+
+\begin{frame}{1. Circular Rail Rotation Axis Changed: $Z \to X$}
+\small
+\textbf{Previous assumption:} The device rotated about the device $Z$-axis,
+using $R_z(-\phi)$.
+
+\medskip
+\textbf{Current implementation:} The device rotates about the device
+\textbf{$X$-axis} (``up''), using $R_x(-\phi)$.
+
+\medskip
+\textbf{Why:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item The device frame convention is $X$ = up, $Y$ = left, $Z$ = inward (into the scene).
+    \item The circular rail lies in the \textbf{$ZY$ plane} (the vertical plane
+          containing the optical axis).
+    \item Rotation in the $ZY$ plane is, by definition, rotation about $X$.
+\end{itemize}
+
+\medskip
+\textbf{Code location:} \texttt{modules/training/losses.py} ---
+\texttt{essential\_from\_circular\_phi()} calls \texttt{\_rot\_x(-phi)}.
+
+\medskip
+\textbf{Relative pose formulas (in camera coords):}
+\[
+    R_{ji} = \Rcd^\top \, R_x(-\phi) \, \Rcd, \qquad
+    \mathbf{t}_{ji} = \Rcd^\top \bigl(R_x(-\phi) - I\bigr)(\tcd + \mathbf{p}_0)
+\]
+\end{frame}
+
+
+% ================================================================
+\section{2. Circular Rail: Reference Position = $[0,0,R]$}
+% ================================================================
+
+\begin{frame}{2. Reference Position Changed: $[R,0,0] \to [0,0,R]$}
+\small
+\textbf{Previous assumption:}
+$\mathbf{p}_0 = [R,\; 0,\; 0]^\top$ (along $+X$).
+
+\medskip
+\textbf{Current implementation:}
+$\mathbf{p}_0 = [0,\; 0,\; R]^\top$ (along $+Z$ = inward).
+
+\medskip
+\textbf{Why:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item At $\phi=0$ the device sits on the rail at the ``front'' position,
+          looking inward --- that is, along $+Z_{\mathrm{dev}}$.
+    \item Placing $\mathbf{p}_0$ along $+Z$ means the device is at radius $R$
+          from the rail center in the direction the camera faces.
+    \item This was confirmed empirically by \texttt{find\_circular\_rail.py}
+          (lowest Sampson error among all axis / position candidates).
+\end{itemize}
+
+\medskip
+\textbf{Code:}
+\begin{lstlisting}
+# losses.py :: essential_from_circular_phi()
+p0 = torch.tensor([0.0, 0.0, rail_radius], device=device, dtype=dtype)
+\end{lstlisting}
+\end{frame}
+
+
+% ================================================================
+\section{3. Linear Rail: Translation Axis = Device Y (Left)}
+% ================================================================
+
+\begin{frame}{3. Linear Rail Axis Changed: $+X \to +Y$}
+\small
+\textbf{Previous assumption:}
+$\mathbf{t}_{\mathrm{dev}} \propto s \cdot [1,\; 0,\; 0]^\top$ (device $X$).
+
+\medskip
+\textbf{Current implementation:}
+$\mathbf{t}_{\mathrm{dev}} \propto s \cdot [0,\; 1,\; 0]^\top$ (device $Y$ = left/right).
+
+\medskip
+\textbf{Why:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item The linear rail moves the device \emph{sideways} in the $ZY$ plane.
+    \item ``Sideways'' in the device frame with $X$=up, $Y$=left, $Z$=inward
+          is the $Y$ direction.
+    \item Confirmed by \texttt{find\_rail\_axis.py}: axis $Y$ with the $\Rcd^\top$
+          convention gives the lowest Sampson error on SIFT matches.
+\end{itemize}
+
+\medskip
+\textbf{Essential matrix:}
+\[
+    E = \skewmat{\Rcd^\top \cdot (0,\; s,\; 0)^\top}
+\]
+
+\textbf{Code:}
+\begin{lstlisting}
+# losses.py :: essential_from_linear_sideways()
+t_dev = torch.tensor([0.0, sign, 0.0], device=device, dtype=dtype)
+t_cam = r_cd.t() @ t_dev
+return _skew(t_cam)
+\end{lstlisting}
+\end{frame}
+
+
+% ================================================================
+\section{4. Fisheye-Aware Undistortion via pycameramodel}
+% ================================================================
+
+\begin{frame}{4. Fisheye Undistortion (Beyond Simple Pinhole $K$)}
+\small
+\textbf{Previous approach:} Normalise pixel coords via $\hat{\mathbf{x}} = K^{-1}[u,v,1]^\top$
+(assumes a pinhole camera with no distortion).
+
+\medskip
+\textbf{Current implementation --- two paths:}
+
+\medskip
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{Path} & \textbf{How it works} \\
+\midrule
+\textbf{A. Pinhole} &
+  CLI flag \texttt{--rail\_k} (9 floats). Calls
+  \texttt{normalize\_points\_with\_K(x\_px, K)}.
+  Simple $K^{-1}$ multiply. \\
+\textbf{B. Fisheye} &
+  CLI flag \texttt{--device\_calib\_path} (XML file).
+  Parses the full lens model via \texttt{pycameramodel}.
+  Calls \texttt{normalize\_points\_with\_cam(x\_px, cam)}.
+  Supports LINEAR, RADIAL\_*, FISHEYE\_*, CHEBYSHEV\_*, FISHEYE\_RATIONAL, etc. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Path B is preferred} for real hardware (e.g.\ Foreseer devices), because
+fisheye lenses have strong radial distortion that a pinhole $K$ cannot model.
+
+\medskip
+\textbf{Code location:} \texttt{losses.py} --- \texttt{rail\_self\_supervision\_loss()}
+checks \texttt{cam is not None} (Path~B) before falling back to \texttt{k0/k1} (Path~A).
+\end{frame}
+
+
+% ================================================================
+\section{5. Differentiable Pycameramodel Wrapper}
+% ================================================================
+
+\begin{frame}{5. \texttt{\_PycamUndistortFn}: Differentiable Fisheye Backward}
+\small
+\textbf{Problem:} \texttt{pycameramodel.Camera.try\_unproject\_from\_pixel} is a
+numpy function with an iterative solver --- not differentiable by default.
+
+\medskip
+\textbf{Solution:} Custom \texttt{torch.autograd.Function} called
+\texttt{\_PycamUndistortFn}:
+
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item \textbf{Forward:} Calls \texttt{cam.try\_unproject\_from\_pixel(pt)} for each
+          pixel $\to$ returns calibrated 3D ray $[x_{\mathrm{ideal}}, y_{\mathrm{ideal}}, 1]$.
+    \item \textbf{Backward:} Finite-difference (central-difference) Jacobian.
+          For each point, perturbs $u \pm \Delta$, $v \pm \Delta$ ($\Delta = 0.05$\,px)
+          to estimate the $3 \times 2$ Jacobian $\partial\hat{\mathbf{x}} / \partial(u,v)$.
+          Chain rule gives $\nabla_{(u,v)} = J^\top \nabla_{\hat{\mathbf{x}}}$.
+    \item \textbf{Invalid pixels} (outside undistortion domain): mapped to $[0,0,1]$
+          with zero gradient --- cannot harm the loss.
+\end{itemize}
+
+\medskip
+\textbf{Why finite-difference?}
+The pycameramodel solver is opaque (closed-form inverse doesn't exist for
+complex models like FISHEYE\_RATIONAL).  Central differences are
+\textbf{model-agnostic} and accurate at $0.05$\,px step size.
+
+\medskip
+\textbf{Code:} \texttt{losses.py} --- class \texttt{\_PycamUndistortFn(torch.autograd.Function)}.
+\end{frame}
+
+
+% ================================================================
+\section{6. RailDataset: Random Pair Sampling}
+% ================================================================
+
+\begin{frame}{6. RailDataset --- Data Pipeline}
+\small
+\textbf{File:} \texttt{modules/dataset/rail\_dataset.py}
+
+\medskip
+\textbf{Design:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item Input: a folder of images whose \textbf{filenames are timestamps}
+          (sorted for reproducibility).
+    \item Each \texttt{\_\_getitem\_\_} samples \textbf{two random distinct images}.
+    \item Images loaded at \textbf{native resolution} (no resizing), converted to \textbf{grayscale}.
+    \item \textbf{Padded} (right/bottom) to the nearest multiple of 32
+          (XFeat backbone has stride-32 downsampling $\Rightarrow$ avoids cropping artefacts).
+    \item Returns \texttt{uint8} tensors $[1,1,H,W]$.
+\end{itemize}
+
+\medskip
+\textbf{SIFT pre-check} (in \texttt{Trainer.\_get\_rail\_pair}):
+\begin{itemize}\setlength{\itemsep}{1pt}
+    \item Before using a pair, SIFT + Lowe's ratio test (0.75) is run.
+    \item Requires $\ge 30$ good matches; if not, the pair is \textbf{rejected}
+          and a new one is drawn (up to 10\,000 attempts).
+    \item Ensures every pair fed to the rail loss has sufficient geometric signal.
+    \item Normalisation to $[0, 1]$ float happens \emph{after} the SIFT check
+          (avoids repeated uint8$\leftrightarrow$float conversions).
+\end{itemize}
+\end{frame}
+
+
+% ================================================================
+\section{7. \texttt{xfeat\_rail} Training Mode}
+% ================================================================
+
+\begin{frame}{7. Rail-Only Training Mode (\texttt{xfeat\_rail})}
+\small
+\textbf{CLI:} \texttt{--training\_type xfeat\_rail}
+
+\medskip
+\textbf{What it does:}
+\begin{itemize}\setlength{\itemsep}{3pt}
+    \item \textbf{No MegaDepth data loaded} (no \texttt{data\_loader}, no \texttt{data\_iter}).
+    \item \textbf{No COCO synthetic augmentation} (no \texttt{augmentor}).
+    \item The \emph{only} loss is the rail self-supervision loss:
+    \[
+        \mathcal{L} = \lambda_{\mathrm{rail}} \cdot J_{\mathrm{manifold}}
+        + \lambda_{\mathrm{dev}} \cdot L_{\mathrm{dev}} + \mathcal{R}
+    \]
+    \item Requires \texttt{--rail\_data\_path} and \texttt{--rail\_lambda > 0},
+          plus either \texttt{--device\_calib\_path} or \texttt{--rail\_k}.
+    \item If a step produces zero matches (loss has no \texttt{grad\_fn}),
+          the step is \textbf{skipped} (no backward, no optimizer step).
+\end{itemize}
+
+\medskip
+\textbf{Use case:} Pure domain adaptation from a single rail data folder ---
+no internet data required.  Combined with fine-tuning (next slide), this gives
+a fully self-contained adaptation pipeline.
+
+\medskip
+\textbf{Other modes} (\texttt{xfeat\_default}, \texttt{xfeat\_synthetic}, \texttt{xfeat\_megadepth})
+can \emph{also} use rail loss on top, via \texttt{--rail\_lambda > 0}.
+\end{frame}
+
+
+% ================================================================
+\section{8. Fine-Tuning \& Selective Re-Initialization}
+% ================================================================
+
+\begin{frame}{8a. Freeze Backbone, Train Only Heads}
+\small
+\textbf{CLI:} \texttt{--finetune\_last\_layers}
+
+\medskip
+\textbf{Mechanism:}
+\begin{enumerate}\setlength{\itemsep}{2pt}
+    \item \textbf{Freeze all} parameters: \texttt{p.requires\_grad = False}.
+    \item \textbf{Unfreeze} only the modules listed in \texttt{--finetune\_modules}
+          (default: \texttt{block\_fusion, heatmap\_head, keypoint\_head, fine\_matcher}).
+    \item \textbf{BatchNorm layers} are forced to \texttt{.eval()} mode globally
+          (running mean/var are frozen). Checked again at the top of every training step.
+    \item Optimizer receives only \texttt{filter(lambda p: p.requires\_grad, ...)}.
+\end{enumerate}
+
+\medskip
+\textbf{Benefits:}
+\begin{itemize}\setlength{\itemsep}{1pt}
+    \item Vastly fewer trainable parameters $\Rightarrow$ faster, less memory.
+    \item Preserves the backbone's generic features $\Rightarrow$ less catastrophic forgetting.
+    \item Logs trainable / total param counts at init for verification.
+\end{itemize}
+
+\textbf{Code:} \texttt{train.py} --- \texttt{Trainer.\_\_init\_\_()}, the
+\texttt{finetune\_last\_layers} block.
+\end{frame}
+
+% ================================================================
+\begin{frame}{8b. Selective Re-Initialization of Heads}
+\small
+\textbf{CLI:} \texttt{--reinit\_last\_layers} (default: \textbf{ON})
+
+\medskip
+\textbf{Mechanism:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item After loading pretrained weights, call \texttt{reset\_parameters()} on
+          every sub-module of the unfrozen heads.
+    \item This gives the heads \textbf{fresh random weights} while the backbone
+          retains its pretrained features.
+    \item All parameters remain \textbf{trainable} (unlike pure freezing).
+\end{itemize}
+
+\medskip
+\textbf{Rationale:}
+\begin{itemize}\setlength{\itemsep}{1pt}
+    \item The pretrained backbone already produces good intermediate features.
+    \item The heads (fusion, heatmap, keypoint, fine matcher) should learn to
+          interpret those features for the \emph{new domain} from scratch.
+    \item Without reinit, heads carry biases from MegaDepth training that may
+          be suboptimal for the target domain.
+\end{itemize}
+
+\medskip
+\textbf{Code:} \texttt{train.py} --- \texttt{Trainer.\_reinit\_module()} calls
+\texttt{m.reset\_parameters()} on all sub-modules with that method (Conv2d, Linear,
+BatchNorm2d, etc.).
+\end{frame}
+
+
+% ================================================================
+\section{9. Dustbin in Soft-Assignment (Phase 2)}
+% ================================================================
+
+\begin{frame}{9. Dustbin Row/Column in Dual-Softmax}
+\small
+\textbf{File:} \texttt{losses.py} --- \texttt{extract\_xfeat\_matches\_soft()}
+
+\medskip
+\textbf{What:} Before applying dual-softmax, the $k \times k$ logit matrix
+$S/\tau$ is augmented with an extra row and column of \textbf{zeros}:
+\[
+    \tilde{S} = \begin{pmatrix} S/\tau & \mathbf{0} \\ \mathbf{0}^\top & 0 \end{pmatrix}
+    \in \R^{(k{+}1) \times (k{+}1)}
+\]
+Dual-softmax is applied to $\tilde{S}$, then only the top-left $k \times k$
+block is kept as assignment matrix $P$.
+
+\medskip
+\textbf{Why:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item Without a dustbin, softmax \emph{forces} every query to be assigned
+          to some target --- even when none is a good match.
+    \item The dustbin acts as a ``no match'' sink: low-confidence queries
+          allocate their probability mass to the dustbin row/column,
+          \textbf{reducing noise} in the soft coordinates.
+    \item Controlled by flag \texttt{dust\_bin=True} (default).
+\end{itemize}
+
+\medskip
+\textbf{Weight computation after dustbin:}
+$\mathrm{conf}_i = \max_j P_{ij}$ (peak assignment value per query).
+Weight = $\mathrm{conf} \cdot h_1 \cdot h_2$ (clipped, normalised).
+\end{frame}
+
+
+% ================================================================
+\section{10. Axis-Determination Diagnostic Tools}
+% ================================================================
+
+\begin{frame}{10a. \texttt{find\_circular\_rail.py}}
+\small
+\textbf{Purpose:} Determine which device-frame axis is the circular rail
+rotation axis, and which extrinsic convention ($\Rcd$ vs $\Rcd^\top$) is correct.
+
+\medskip
+\textbf{Algorithm:}
+\begin{enumerate}\setlength{\itemsep}{2pt}
+    \item For each of the \textbf{6 candidates} (3 axes $\times$ 2 conventions):
+    \begin{enumerate}
+        \item Load $N$ random image pairs from the rail folder.
+        \item Extract SIFT matches $\to$ calibrated homogeneous coords.
+        \item Run the grid+Gauss-Newton solver to find $\phi^*$.
+        \item Accumulate the total weighted Sampson cost.
+    \end{enumerate}
+    \item Select the candidate with the \textbf{lowest total cost}.
+    \item Generate an interactive \textbf{3D Plotly visualisation}:
+          device frame, camera frame, circular arc, multiple device positions,
+          rotation axis.
+\end{enumerate}
+
+\medskip
+\textbf{Result for our Foreseer hardware:}
+Rotation axis = $X$ (up), convention = $\Rcd$ as-is (not transposed).
+\end{frame}
+
+% ================================================================
+\begin{frame}{10b. \texttt{find\_rail\_axis.py}}
+\small
+\textbf{Purpose:} Same idea for the \textbf{linear rail}: determine which
+device-frame axis is the translation direction.
+
+\medskip
+\textbf{Algorithm:}
+\begin{enumerate}\setlength{\itemsep}{2pt}
+    \item For each of the \textbf{6 candidates} (3 axes $\times$ 2 conventions):
+    \begin{enumerate}
+        \item Construct $E = [\Rcd^{(\cdot)} \cdot \mathbf{e}_k]_\times$.
+        \item Evaluate weighted Sampson cost over SIFT matches from $N$ pairs.
+    \end{enumerate}
+    \item Select the candidate with the lowest total cost.
+    \item 3D Plotly visualisation: device frame, camera frame, camera optical axis,
+          winning translation axis \& direction.
+\end{enumerate}
+
+\medskip
+\textbf{Result for our hardware:}
+Translation axis = $Y$ (left), convention = $\Rcd^\top$ (i.e.\ $\Rdc$).
+
+\medskip
+\textbf{Note:} Both scripts require paths to the rail image folder and
+\texttt{device\_calibration.xml}. They are one-time diagnostic tools ---
+once the axis is determined, the result is hard-coded in \texttt{losses.py}.
+\end{frame}
+
+
+% ================================================================
+\section{11. Extrinsics from \texttt{device\_calibration.xml}}
+% ================================================================
+
+\begin{frame}{11. Automatic Extrinsics Loading}
+\small
+\textbf{File:} \texttt{losses.py} --- \texttt{load\_rail\_extrinsics\_from\_calib()}
+
+\medskip
+\textbf{Input:} Path to \texttt{device\_calibration.xml} (proprietary format used
+by Foreseer / Qualcomm devices).
+
+\medskip
+\textbf{What it extracts:}
+\begin{itemize}\setlength{\itemsep}{2pt}
+    \item \texttt{ombc} --- Rodrigues angle-axis rotation vector (CAM $\to$ BODY).
+    \item \texttt{tbc} --- camera origin expressed in body frame.
+    \item Parsed via \texttt{pycameramodel.utils.parse\_device\_calibration()}.
+    \item The IMU config key can be specified via \texttt{--imu\_name}
+          (default: primary IMU, key = \texttt{"imu\_config"}).
+\end{itemize}
+
+\medskip
+\textbf{Conversion:}
+Since device = body frame:
+\[
+    \Rcd = \mathrm{rodrigues}(\texttt{ombc}), \qquad \tcd = \texttt{tbc}
+\]
+Rodrigues conversion is done in pure NumPy (\texttt{\_rodrigues\_to\_matrix\_np})
+--- no OpenCV dependency.
+
+\medskip
+\textbf{In training:} The trainer reads these once at init and stores
+\texttt{self.rail\_r\_cd}, \texttt{self.rail\_t\_cd} as tensors on the
+training device (CUDA/CPU).
+\end{frame}
+
+
+% ================================================================
+\section{File Map}
+% ================================================================
+
+\begin{frame}{File Map: Where Everything Lives}
+\small
+\begin{center}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{File} & \textbf{Responsibility} \\
+\midrule
+\texttt{modules/training/train.py} &
+  CLI parsing, \texttt{Trainer} class, training loop,
+  rail pair sampling (SIFT pre-check), 4 training modes. \\
+\texttt{modules/training/losses.py} &
+  All losses (XFeat + rail). Geometry helpers, solvers,
+  match extraction (Phase 1 \& 2), fisheye wrapper, extrinsics loading. \\
+\texttt{modules/dataset/rail\_dataset.py} &
+  \texttt{RailDataset}: random pair sampling at native resolution. \\
+\texttt{find\_circular\_rail.py} &
+  Diagnostic: find circular rail rotation axis \& visualise. \\
+\texttt{find\_rail\_axis.py} &
+  Diagnostic: find linear rail translation axis \& visualise. \\
+\texttt{modules/model.py} &
+  \texttt{XFeatModel} architecture (unchanged from upstream). \\
+\texttt{third\_party/alike\_wrapper.py} &
+  ALIKE keypoint extraction for distillation loss. \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{frame}
+
+
+% ================================================================
+\section{Quick-Reference: CLI Flags}
+% ================================================================
+
+\begin{frame}{Quick-Reference: Key CLI Flags}
+\small
+\begin{center}
+\begin{tabular}{lp{7.5cm}}
+\toprule
+\textbf{Flag} & \textbf{Purpose} \\
+\midrule
+\texttt{--training\_type} & \texttt{xfeat\_default | xfeat\_synthetic | xfeat\_megadepth | xfeat\_rail} \\
+\texttt{--rail\_mode} & \texttt{circular | linear} \\
+\texttt{--rail\_data\_path} & Folder with timestamped rail images \\
+\texttt{--rail\_lambda} & Weight $\lambda_{\mathrm{rail}}$ (0 = disabled) \\
+\texttt{--device\_calib\_path} & Path to \texttt{device\_calibration.xml} (fisheye) \\
+\texttt{--rail\_cam\_name} & Camera key inside XML (default: first camera) \\
+\texttt{--imu\_name} & IMU config key in XML (default: primary) \\
+\texttt{--rail\_k} & Pinhole $K$ (9 comma-sep floats; fallback if no XML) \\
+\texttt{--finetune\_last\_layers} & Freeze backbone, train only heads \\
+\texttt{--finetune\_modules} & Comma-separated module names to unfreeze \\
+\texttt{--reinit\_last\_layers} & Re-init unfrozen heads (default: True) \\
+\texttt{--pretrained\_path} & Path to pretrained \texttt{.pt} weights \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{frame}
+
+
+% ================================================================
+\begin{frame}{Hyper-Parameters (\texttt{RAIL\_DEFAULTS})}
+\small
+Defined in \texttt{losses.py} as a dict:
+\begin{center}
+\begin{tabular}{llp{5.5cm}}
+\toprule
+\textbf{Key} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\texttt{topk}           & 1024  & \# keypoints per image for matching \\
+\texttt{min\_cos}       & 0.1   & Cosine threshold (hard matching) \\
+\texttt{tau}            & 0.1   & Softmax temperature (Phase 2) \\
+\texttt{hard\_matching} & False & True=Phase 1 (MNN), False=Phase 2 (soft) \\
+\texttt{min\_matches}   & 64    & Skip rail loss if fewer matches \\
+\texttt{phi\_min/max}   & $\pm$0.35 & Search range for circular $\phi$ (rad) \\
+\texttt{phi\_grid\_steps} & 41  & Grid resolution for coarse search \\
+\texttt{gn\_steps}      & 3     & Gauss-Newton refinement iterations \\
+\texttt{radius}         & 1.0   & Circular rail radius $R$ (metres) \\
+\texttt{lin\_allow\_both\_signs} & True & Test both $s=\pm 1$ on linear rail \\
+\texttt{lambda\_dev}    & 0.0   & Deviation loss weight \\
+\texttt{lambda\_entropy} & 0.0  & Weight-entropy regularizer \\
+\texttt{lambda\_coverage} & 0.0 & Spatial-coverage regularizer \\
+\texttt{rho\_eps}       & $10^{-6}$ & Charbonnier kernel $\varepsilon$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{frame}
+
+
+% ================================================================
+\begin{frame}{}
+\begin{center}
+    {\Huge End of Implementation Details}
+
+    \vspace{1em}
+    {\large See \texttt{rail\_self\_supervision.tex} for the mathematical formulation.}
+\end{center}
+\end{frame}
+
+\end{document}

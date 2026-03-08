@@ -97,7 +97,8 @@ def parse_arguments():
                         help='IMU config key inside device_calibration.xml to read ombc/tbc from '
                              '(e.g. "imu_config_None"). Empty = use the primary IMU (recommended).')
     args = parser.parse_args()
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.device_num
+    if torch.cuda.is_available():
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.device_num
     return args
 
 
@@ -111,7 +112,13 @@ class Trainer():
     def __init__(self, args):
         self.args = args
 
-        self.dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if torch.cuda.is_available():
+            self.dev = torch.device('cuda')
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            self.dev = torch.device('mps')
+        else:
+            self.dev = torch.device('cpu')
+        print(f"[Init] Using device: {self.dev}")
         self.net = XFeatModel().to(self.dev)
         if args.pretrained_path:
             ckpt = torch.load(args.pretrained_path, map_location=self.dev)
@@ -518,21 +525,21 @@ def main():
     args = parse_arguments()
 
     # Override defaults for quick local testing (comment out for CLI usage)
-    args.training_type = 'xfeat_rail'
-    args.rail_mode = 'linear'
-    args.rail_data_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
-    args.rail_lambda = 0.2
-    args.device_calib_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/device_calibration.xml'
-    args.rail_cam_name = 'trackingA'
-    args.ckpt_save_path = '/local/mnt/workspace/v3dof/codes/XfeatTraining/modules/training/linear_with_fusion_kpHead_heatHead'
-    args.n_steps = 501
-    args.finetune_last_layers = True
-    args.finetune_modules = 'block_fusion,heatmap_head'
+    # args.training_type = 'xfeat_rail'
+    # args.rail_mode = 'linear'
+    # args.rail_data_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
+    # args.rail_lambda = 0.2
+    # args.device_calib_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/device_calibration.xml'
+    # args.rail_cam_name = 'trackingA'
+    # args.ckpt_save_path = '/local/mnt/workspace/v3dof/codes/XfeatTraining/modules/training/linear_with_fusion_kpHead_heatHead'
+    # args.n_steps = 501
+    # args.finetune_last_layers = True
+    # args.finetune_modules = 'block_fusion,heatmap_head'
 
-    # args.training_type = 'xfeat_synthetic'
-    # args.synthetic_root_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
-    # args.ckpt_save_path = '/local/mnt/workspace/v3dof/codes/XfeatTraining/modules/training/ckpt_linear_synth'
-
+    # --- COCO synthetic training (as described in the XFeat paper) ---
+    args.training_type = 'xfeat_synthetic'
+    args.synthetic_root_path = '/Users/shantnu/Data/coco_20k'
+    args.ckpt_save_path = '/tmp/xfeat_ckpt_synthetic'
     trainer = Trainer(args)
     trainer.train()
 
