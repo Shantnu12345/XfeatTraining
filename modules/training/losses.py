@@ -5,7 +5,7 @@ import sys as _sys
 import os as _os
 from modules.dataset.megadepth import megadepth_warper
 from modules.training import utils
-# from third_party.alike_wrapper import extract_alike_kpts
+from third_party.alike_wrapper import extract_alike_kpts
 """
 Rail self-supervision for circular / linear rail manifolds.
 Extrinsics are CAMERA->DEVICE: p_dev = R_cd p_cam + t_cd.
@@ -100,15 +100,25 @@ def fine_loss(coords1, coords2, margin=1.0, alpha=0.5):
     return loss.mean()
 
 
-def alike_distill_loss(im, kp_map, scores, device='cuda'):
+def alike_distill_loss(kp_map, im, scores, device='cuda'):
     """
     Keypoint distillation loss from the ALIKE detector.
     Extracts ALIKE keypoints from the raw image, selects the top-300 XFeat
     keypoints by score, and computes the mean distance from each XFeat keypoint
     to its nearest ALIKE keypoint (in normalised [-1,1] image coordinates).
-    This encourages XFeat to predict keypoints near where ALIKE would.
+
+    Parameters
+    ----------
+    kp_map : Tensor [65, H/8, W/8]  – keypoint logit map from XFeat
+    im     : Tensor [1, H, W]       – grayscale image (float, 0-1 range)
+    scores : Tensor [H/8, W/8]      – reliability heatmap
+    device : str
     """
-    kp_alike = extract_alike_kpts(im, device=device)
+    import numpy as _np
+    # Convert grayscale tensor [1,H,W] -> [H,W,3] uint8 numpy for ALIKE
+    im_np = (im.squeeze(0).detach().cpu().clamp(0, 1) * 255).byte().numpy()
+    im_rgb = _np.stack([im_np, im_np, im_np], axis=-1)  # [H,W,3]
+    kp_alike = extract_alike_kpts(im_rgb)
     if len(kp_alike) < 1:
         return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
     kp_map = kp_map.squeeze(0)
@@ -120,7 +130,14 @@ def alike_distill_loss(im, kp_map, scores, device='cuda'):
     x = (x / (W - 1)) * 2.0 - 1.0
     y = (y / (H - 1)) * 2.0 - 1.0
     kp_xfeat = torch.stack([x, y], dim=1)
-    dist = torch.cdist(kp_xfeat, kp_alike)
+    # Normalize ALIKE keypoints to [-1, 1] range
+    im_h, im_w = im_np.shape[:2]
+    if isinstance(kp_alike, _np.ndarray):
+        kp_alike = torch.from_numpy(kp_alike).float().to(device)
+    kp_alike_norm = kp_alike.clone()
+    kp_alike_norm[:, 0] = (kp_alike_norm[:, 0] / (im_w - 1)) * 2.0 - 1.0
+    kp_alike_norm[:, 1] = (kp_alike_norm[:, 1] / (im_h - 1)) * 2.0 - 1.0
+    dist = torch.cdist(kp_xfeat.to(device), kp_alike_norm.to(device))
     min_dist = dist.min(dim=1).values
     loss = min_dist.mean()
     acc = (min_dist < 0.05).float().mean()
@@ -134,8 +151,8 @@ def coordinate_classification_loss(coords_logits, pts1, pts2, conf, bins=8):
     network to predict the correct bin via cross-entropy. The confidence
     vector `conf` weights each sample (normalised to sum 1).
     """
-    # pts are coarse coords on feature map; offsets in [-4,4] (assuming stride 8 logic)
-    off = (pts2 - pts1).clamp(-4, 4).long() + 4
+    # pts are coarse coords on feature map; offsets in [-4,3] (assuming stride 8 logic)
+    off = (pts2 - pts1).clamp(-4, 3).long() + 4
     labels = off[:, 1] * bins + off[:, 0]   # y*bins + x
     coords_log = F.log_softmax(coords_logits, dim=-1)
     loss = F.nll_loss(coords_log, labels, reduction='none')

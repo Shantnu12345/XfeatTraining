@@ -411,7 +411,8 @@ class Trainer():
                         h2 = hmap2[b, 0, pts2[:,1].long(), pts2[:,0].long()]
                         coords1 = self.net.fine_matcher(torch.cat([m1, m2], dim=-1))
                         #Compute losses
-                        loss_ds, conf = dual_softmax_loss(m1, m2)
+                        loss_ds, conf_matrix = dual_softmax_loss(m1, m2)
+                        conf = conf_matrix.diag()  # per-point matching confidence [N]
                         loss_coords, acc_coords = coordinate_classification_loss(coords1, pts1, pts2, conf)
                         loss_kp_pos1, acc_pos1 = alike_distill_loss(kpts1[b], p1[b], hmap1[b, 0], device=str(self.dev))
                         loss_kp_pos2, acc_pos2 = alike_distill_loss(kpts2[b], p2[b], hmap2[b, 0], device=str(self.dev))
