@@ -4,12 +4,12 @@ import numpy as _np
 import sys as _sys
 import os as _os
 from modules.dataset.megadepth import megadepth_warper
-from modules.trainz̄ing import utils
-# from third_party.alike_wrapper import extract_alike_kpts
+from modules.trainz̄ing import utils# from third_party.alike_wrapper import extract_alike_kpts
 """
 Rail self-supervision for circular / linear rail manifolds.
 Extrinsics are CAMERA->DEVICE: p_dev = R_cd p_cam + t_cd.
 """
+
 # Ensure pycameramodel package (local copy) is on the path.
 _pycam_root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..', 'pycameramodel'))
 if _pycam_root not in _sys.path:
@@ -19,6 +19,8 @@ try:
     _PYCAM_AVAILABLE = True
 except ImportError:
     _PYCAM_AVAILABLE = False
+
+
 # =========================
 # Rail default hyper-parameters (keeps train.py argparse clean)
 # =========================
@@ -45,6 +47,8 @@ RAIL_DEFAULTS = {
     # robust kernel
     "rho_eps": 1e-6,
 }
+
+
 # =========================
 # Original XFeat losses
 # =========================
@@ -69,6 +73,8 @@ def dual_softmax_loss(X, Y, temp=0.2):
     conf = conf / (conf.sum() + 1e-8)
     loss = (loss * conf).sum()
     return loss * 2., conf_matrix
+
+
 def smooth_l1_loss(x, y, beta=1.0):
     """
     Element-wise Smooth-L1 (Huber) loss.
@@ -78,6 +84,8 @@ def smooth_l1_loss(x, y, beta=1.0):
     cond = n < beta
     loss = torch.where(cond, 0.5 * n ** 2 / beta, n - 0.5 * beta)
     return loss
+
+
 def fine_loss(coords1, coords2, margin=1.0, alpha=0.5):
     """
     Fine-level coordinate regression loss.
@@ -89,6 +97,8 @@ def fine_loss(coords1, coords2, margin=1.0, alpha=0.5):
     loss = smooth_l1_loss(dist, torch.zeros_like(dist), beta=margin)
     loss = alpha * (1.0 - torch.exp(-loss))
     return loss.mean()
+
+
 def alike_distill_loss(im, kp_map, scores, device='cuda'):
     """
     Keypoint distillation loss from the ALIKE detector.
@@ -114,6 +124,8 @@ def alike_distill_loss(im, kp_map, scores, device='cuda'):
     loss = min_dist.mean()
     acc = (min_dist < 0.05).float().mean()
     return loss, acc
+
+
 def coordinate_classification_loss(coords_logits, pts1, pts2, conf, bins=8):
     """
     Fine coordinate-offset classification loss.
@@ -131,12 +143,16 @@ def coordinate_classification_loss(coords_logits, pts1, pts2, conf, bins=8):
     pred = coords_log.argmax(dim=-1)
     acc = (pred == labels).float().mean()
     return loss * 2., acc
+
+
 def keypoint_loss(heatmap, target):
     """
     Keypoint reliability loss — L1 distance between the predicted heatmap and
     a target heatmap (e.g. generated from ALIKE detections). Scaled by 3.0.
     """
     return F.l1_loss(heatmap, target) * 3.0
+
+
 def hard_triplet_loss(X, Y, margin=0.5):
     """
     Hard-negative triplet loss for descriptor learning.
@@ -152,9 +168,12 @@ def hard_triplet_loss(X, Y, margin=0.5):
     hard_neg = torch.min(dist_neg, 1)[0]
     loss = torch.clamp(margin + dist_pos - hard_neg, min=0.)
     return loss.mean()
+
+
 # =========================
 # Geometry helpers
 # =========================
+
 def _skew(t):
     """
     Skew-symmetric (cross-product) matrix from a 3-vector.
@@ -170,6 +189,8 @@ def _skew(t):
         torch.stack([tz, z, -tx]),
         torch.stack([-ty, tx, z]),
     ], dim=0)
+
+
 def _rot_z(theta):
     """
     3x3 rotation matrix about the Z-axis by angle `theta` (radians).
@@ -186,6 +207,8 @@ def _rot_z(theta):
         torch.stack([s,  c, z]),
         torch.stack([z,  z, o]),
     ], dim=0)
+
+
 def _rot_x(theta):
     """
     3x3 rotation matrix about the X-axis by angle `theta` (radians).
@@ -205,18 +228,24 @@ def _rot_x(theta):
         torch.stack([z,  c, -s]),
         torch.stack([z,  s,  c]),
     ], dim=0)
+
+
 def _to_h(x):
     """
     Convert 2D points to homogeneous coordinates by appending a column of ones.
     """
     ones = torch.ones((x.shape[0], 1), device=x.device, dtype=x.dtype)
     return torch.cat([x, ones], dim=1)
+
+
 def normalize_points_with_K(x_px, K):
     """x_px (N,2) pixels -> calibrated homogeneous (N,3) via inv(K)."""
     K = K.to(device=x_px.device, dtype=x_px.dtype).view(3, 3)
     x_h = _to_h(x_px)
     x_n = (torch.linalg.inv(K) @ x_h.t()).t()
     return x_n
+
+
 class _PycamUndistortFn(torch.autograd.Function):
     """
     Differentiable wrapper around pycameramodel's try_unproject_from_pixel.
@@ -291,6 +320,8 @@ class _PycamUndistortFn(torch.autograd.Function):
             torch.from_numpy(grad_in).to(device=x_px.device, dtype=x_px.dtype),
             None,   # cam is not a Tensor — no gradient
         )
+
+
 def normalize_points_with_cam(x_px, cam):
     """
     Fisheye-aware replacement for normalize_points_with_K.
@@ -310,6 +341,8 @@ def normalize_points_with_cam(x_px, cam):
             "Install it with: pip install -e modules/pycameramodel"
         )
     return _PycamUndistortFn.apply(x_px, cam)
+
+
 def sampson_error(x1n_h, x2n_h, E, eps=1e-8):
     """
     Sampson distance (first-order approximation to geometric/reprojection error).
@@ -323,6 +356,8 @@ def sampson_error(x1n_h, x2n_h, E, eps=1e-8):
     x2tEx1 = torch.sum(x2n_h * Ex1, dim=1)
     denom = Ex1[:, 0]**2 + Ex1[:, 1]**2 + Etx2[:, 0]**2 + Etx2[:, 1]**2
     return (x2tEx1**2) / (denom + eps)
+
+
 def robust_charbonnier(x, eps=1e-6):
     """
     Charbonnier robust kernel: rho(x) = sqrt(x + eps^2).
@@ -331,6 +366,8 @@ def robust_charbonnier(x, eps=1e-6):
     errors are down-weighted relative to MSE.
     """
     return torch.sqrt(x + eps*eps)
+
+
 def weighted_8point_essential(x1n_h, x2n_h, w, eps=1e-8):
     """
     Weighted 8-point algorithm for Essential matrix estimation.
@@ -364,9 +401,12 @@ def weighted_8point_essential(x1n_h, x2n_h, w, eps=1e-8):
     E = U @ torch.diag(S_new) @ VhE
     E = E / (E.norm() + eps)
     return E
+
+
 # =========================
 # Extrinsics helpers (CAM->DEV given / loaded from XML)
 # =========================
+
 def _rodrigues_to_matrix_np(rvec):
     """
     Convert a Rodrigues (angle-axis) rotation vector to a 3x3 rotation matrix
@@ -392,6 +432,8 @@ def _rodrigues_to_matrix_np(rvec):
         [-axis[1],  axis[0],  0.0],
     ], dtype=np.float64)
     return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
 def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
     """
     Load camera-to-device extrinsics (R_cd, t_cd) from a device_calibration.xml.
@@ -450,6 +492,8 @@ def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
     print(f"  R_cd  =\n{R_cd}")
     print(f"  t_cd  = {t_cd}")
     return R_cd.astype(np.float32), t_cd.astype(np.float32)
+
+
 def _cam_to_dev_to_dev_to_cam(r_cd, t_cd):
     """
     Given camera->device: p_dev = R_cd p_cam + t_cd,
@@ -460,9 +504,12 @@ def _cam_to_dev_to_dev_to_cam(r_cd, t_cd):
     r_dc = r_cd.t()
     t_dc = -r_dc @ t_cd
     return r_dc, t_dc
+
+
 # =========================
 # Circular rail manifold
 # =========================
+
 def essential_from_circular_phi(phi, rail_radius, r_cd, t_cd):
     """
     Circular rail in the device ZY plane (device frame: X=up, Y=left, Z=inward).
@@ -494,6 +541,8 @@ def essential_from_circular_phi(phi, rail_radius, r_cd, t_cd):
     # t_ji in camera frame: R_cd^T brings (Rx(-phi)-I)(t_cd+p0) from device→camera
     t_ji = r_cd.t() @ (rx - I) @ (t_cd + p0)
     return _skew(t_ji) @ r_ji
+
+
 def _circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd):
     """
     Evaluate the weighted robust Sampson cost at a given angle phi on the circular rail.
@@ -504,6 +553,8 @@ def _circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd):
     E = essential_from_circular_phi(phi, rail_radius, r_cd, t_cd)
     r = sampson_error(x1n_h, x2n_h, E)
     return torch.sum(w * robust_charbonnier(r, eps=rho_eps))
+
+
 def solve_phi_circular(x1n_h, x2n_h, w,
                          phi_min, phi_max,
                          coarse_steps=41, gn_steps=3,
@@ -537,9 +588,12 @@ def solve_phi_circular(x1n_h, x2n_h, w,
      # Final cost computation outside no_grad for gradient flow
      J = _circular_objective(phi, x1n_h, x2n_h, w, rho_eps, rail_radius, r_cd, t_cd)
      return phi, E, J
+
+
 # =========================
 # Linear rail manifold (fixed orientation, sideways along +X_dev)
 # =========================
+
 def essential_from_linear_sideways(r_cd, sign=+1.0):
     """
     Linear rail in the device ZY plane (device frame: X=up, Y=left, Z=inward).
@@ -557,6 +611,8 @@ def essential_from_linear_sideways(r_cd, sign=+1.0):
     t_dev = torch.tensor([0.0, sign, 0.0], device=device, dtype=dtype)
     t_cam = r_cd.t() @ t_dev
     return _skew(t_cam)
+
+
 def _linear_objective(sign, x1n_h, x2n_h, w, rho_eps, r_cd):
     """
     Evaluate the weighted robust Sampson cost for the linear rail at a given sign.
@@ -567,6 +623,8 @@ def _linear_objective(sign, x1n_h, x2n_h, w, rho_eps, r_cd):
     E = essential_from_linear_sideways(r_cd, sign=sign)
     r = sampson_error(x1n_h, x2n_h, E)
     return torch.sum(w * robust_charbonnier(r, eps=rho_eps))
+
+
 def solve_linear_sign(x1n_h, x2n_h, w, rho_eps=1e-6, r_cd=None, allow_both=True):
     """
     Solve for the optimal translation sign on the linear rail.
@@ -593,9 +651,12 @@ def solve_linear_sign(x1n_h, x2n_h, w, rho_eps=1e-6, r_cd=None, allow_both=True)
     # Final cost computation outside no_grad
     J = _linear_objective(sign.item(), x1n_h, x2n_h, w, rho_eps, r_cd)
     return sign, E, J
+
+
 # =========================
 # Match extraction — Phase 1 (hard coords, differentiable weights)  [KEPT FOR REFERENCE]
 # =========================
+
 def extract_xfeat_matches(f1, f2, h1, h2, topk=1024, min_cos=0.1):
     """
     Phase-1 hard extraction. Kept for compatibility / evaluation.
@@ -645,9 +706,12 @@ def extract_xfeat_matches(f1, f2, h1, h2, topk=1024, min_cos=0.1):
     w_out = torch.clamp(w_out, min=0.0)
     w_out = w_out / (w_out.sum() + 1e-8)
     return x1, x2, w_out
+
+
 # =========================
 # Match extraction — Phase 2 (soft-assignment, fully differentiable)
 # =========================
+
 def extract_xfeat_matches_soft(f1, f2, h1, h2, topk=1024, tau=0.1, dust_bin=True):
     """
     Phase-2 soft-assignment extraction. Gradients flow through BOTH
@@ -712,9 +776,12 @@ def extract_xfeat_matches_soft(f1, f2, h1, h2, topk=1024, tau=0.1, dust_bin=True
     w_out = torch.clamp(w_out, min=0.0)
     w_out = w_out / (w_out.sum() + 1e-8)
     return x1_hard, x2_soft, w_out
+
+
 # =========================
 # Regularizers (correct sign)
 # =========================
+
 def _weighted_entropy(w, eps=1e-8):
     """
     Shannon entropy of the normalised weight distribution.
@@ -727,6 +794,8 @@ def _weighted_entropy(w, eps=1e-8):
     p = w / (w.sum() + eps)
     p = torch.clamp(p, min=eps)
     return -torch.sum(p * torch.log(p))
+
+
 def _coverage_entropy(x_px, w, img_h, img_w, bins=8, eps=1e-8):
     """
     Spatial coverage entropy of match locations.
@@ -750,9 +819,12 @@ def _coverage_entropy(x_px, w, img_h, img_w, bins=8, eps=1e-8):
     occ = occ / (occ.sum() + eps)
     occ = torch.clamp(occ, min=eps)
     return -torch.sum(occ * torch.log(occ))
+
+
 # =========================
 # Unified rail loss API (mode: circular or linear)
 # =========================
+
 def rail_self_supervision_loss(
     *,
     mode: str,

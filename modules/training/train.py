@@ -10,11 +10,15 @@ import sys
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+
 def _parse_mat3(s):
     vals = [float(v) for v in s.split(',')]
     if len(vals) != 9:
         raise argparse.ArgumentTypeError("Expected 9 comma-separated floats.")
     return vals
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="XFeat training script.")
     parser.add_argument('--megadepth_root_path', type=str, default='/ssd/guipotje/Data/MegaDepth',
@@ -77,7 +81,10 @@ def parse_arguments():
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device_num
     return args
+
+
 args = parse_arguments()
+
 import glob
 import tqdm
 import torch
@@ -94,6 +101,8 @@ from modules.dataset.megadepth.megadepth import MegaDepthDataset
 from modules.dataset.megadepth import megadepth_warper
 from modules.dataset.rail_dataset import RailDataset
 from torch.utils.data import Dataset, DataLoader
+
+
 class Trainer():
     """
         Class for training XFeat with default params as described in the paper.
@@ -122,11 +131,13 @@ class Trainer():
             state_dict = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
             self.net.load_state_dict(state_dict, strict=False)
             print(f"[Init] Loaded pretrained weights from: {args.pretrained_path}")
+
         # Optional: reinitialize last layers with random weights
         if getattr(args, 'reinit_last_layers', False):
             for name in (m.strip() for m in str(args.finetune_modules).split(',') if m.strip()):
                 if hasattr(self.net, name):
                     self._reinit_module(getattr(self.net, name))
+
         # ------------------------------
         # Optional fine-tuning: train only selected (late) modules
         # ------------------------------
@@ -150,12 +161,14 @@ class Trainer():
             n_train = sum(p_.numel() for p_ in self.net.parameters() if p_.requires_grad)
             n_total = sum(p_.numel() for p_ in self.net.parameters())
             print(f"[FineTune] Trainable params: {n_train}/{n_total} ({100.0*n_train/max(n_total,1):.2f}%)")
+
         # Optimizer / scheduler (uses only params with requires_grad=True)
         #Setup optimizer
         self.batch_size = batch_size
         self.steps = n_steps
         self.opt = optim.Adam(filter(lambda x: x.requires_grad, self.net.parameters()) , lr = lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=30_000, gamma=gamma_steplr)
+
         ##################### Synthetic COCO INIT ##########################
         if model_name in ('xfeat_default', 'xfeat_synthetic'):
             self.augmentor = AugmentationPipe(
@@ -174,6 +187,7 @@ class Trainer():
         else:
             self.augmentor = None
         ##################### Synthetic COCO END #######################
+
         ##################### MEGADEPTH INIT ##########################
         if model_name in ('xfeat_default', 'xfeat_megadepth'):
             TRAIN_BASE_PATH = f"{megadepth_root_path}/train_data/megadepth_indices"
@@ -189,6 +203,7 @@ class Trainer():
         else:
             self.data_iter = None
         ##################### MEGADEPTH INIT END #######################
+
         ##################### RAIL INIT ##########################
         self.rail_enabled = (rail_lambda > 0.0 and rail_data_path != '')
         self.rail_lambda = rail_lambda
@@ -243,11 +258,13 @@ class Trainer():
             print(f"[Rail] Enabled: mode={rail_mode}, lambda={rail_lambda}, "
                   f"data={rail_data_path}, images={len(rail_ds.image_paths)}")
         ##################### RAIL INIT END ########################
+
         if model_name == 'xfeat_rail' and not self.rail_enabled:
             raise RuntimeError(
                 "[xfeat_rail] --rail_data_path and --rail_lambda (> 0) are required, "
                 "plus either --device_calib_path (fisheye) or --rail_k (pinhole)."
             )
+
         os.makedirs(ckpt_save_path, exist_ok=True)
         os.makedirs(ckpt_save_path + '/logdir', exist_ok=True)
         self.dry_run = dry_run
@@ -255,6 +272,7 @@ class Trainer():
         self.ckpt_save_path = ckpt_save_path
         self.writer = SummaryWriter(ckpt_save_path + f'/logdir/{model_name}_' + time.strftime("%Y_%m_%d-%H_%M_%S"))
         self.model_name = model_name
+
     @staticmethod
     def _reinit_module(module):
         """Reinitialize all parameters in a module using PyTorch's own defaults."""
@@ -308,6 +326,7 @@ class Trainer():
                     return img0_norm, img1_norm
             attempts += 1
         raise RuntimeError(f"[Rail] Unable to find image pair with at least {min_matches} SIFT matches after 10000 attempts.")
+
     def train(self):
         self.net.train()
         # Keep BatchNorm layers frozen when fine-tuning only last layers
@@ -315,6 +334,7 @@ class Trainer():
             for m in self.net.modules():
                 if isinstance(m, torch.nn.BatchNorm2d):
                     m.eval()
+
         difficulty = 0.10
         rc = RAIL_DEFAULTS  # rail config defaults from losses.py
         p1s, p2s, H1, H2 = None, None, None, None
@@ -323,6 +343,7 @@ class Trainer():
             p1s, p2s, H1, H2 = make_batch(self.augmentor, difficulty)
         if self.data_iter is not None:
             d = next(self.data_iter)
+
         with tqdm.tqdm(total=self.steps) as pbar:
             for i in range(self.steps):
                 if getattr(args, 'finetune_last_layers', False):
@@ -342,6 +363,7 @@ class Trainer():
                     if self.augmentor is not None:
                         #Grab synthetic data
                         p1s, p2s, H1, H2 = make_batch(self.augmentor, difficulty)
+
                 # ── Default metrics / loss (skipped in xfeat_rail mode) ──
                 acc_coarse_0 = 0.0
                 acc_coarse   = 0.0
@@ -468,6 +490,7 @@ class Trainer():
                         rail_aux = aux_param.item()
                         rail_ldev_val = L_dev.item()
                 ##################### RAIL LOSS END ######################
+
                 # Compute Backward Pass
                 # In rail-only mode, skip the step if no rail matches were found
                 # (loss is still a plain zero scalar with no grad_fn)
@@ -480,12 +503,15 @@ class Trainer():
                 self.opt.step()
                 self.opt.zero_grad()
                 self.scheduler.step()
+
                 if (i+1) % self.save_ckpt_every == 0:
                     print('saving iter ', i+1)
                     torch.save(self.net.state_dict(), self.ckpt_save_path + f'/{self.model_name}_{i+1}.pth')
+
                 pbar.set_description( 'Loss: {:.9f} acc_c0 {:.3f} acc_c1 {:.3f} acc_f: {:.3f} loss_c: {:.3f} loss_f: {:.3f} loss_kp: {:.3f} #matches_c: {:d} loss_kp_pos: {:.3f} acc_kp_pos: {:.3f} rail: {:.4f} Ldev: {:.4f} rail_nm: {:d}'.format(
                                         loss.item(), acc_coarse_0, acc_coarse, acc_coords, loss_coarse, loss_coord, loss_l1, nb_coarse, loss_kp_pos, acc_pos, rail_loss_val, rail_ldev_val, rail_n_matches) )
                 pbar.update(1)
+
                 # Log metrics
                 self.writer.add_scalar('Loss/total', loss.item(), i)
                 self.writer.add_scalar('Accuracy/coarse_synth', acc_coarse_0, i)
@@ -513,9 +539,11 @@ if __name__ == '__main__':
     args.n_steps = 501
     args.finetune_last_layers = True
     args.finetune_modules = 'block_fusion,heatmap_head'
+
     # args.training_type = 'xfeat_synthetic'
     # args.synthetic_root_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
     # args.ckpt_save_path = '/local/mnt/workspace/v3dof/codes/XfeatTraining/modules/training/ckpt_linear_synth'
+
     trainer = Trainer(
         megadepth_root_path=args.megadepth_root_path,
         synthetic_root_path=args.synthetic_root_path,
@@ -537,6 +565,7 @@ if __name__ == '__main__':
         rail_cam_name=args.rail_cam_name,
         imu_name=args.imu_name,
     )
+
     #The most fun part
     trainer.train()
 # Example usage:

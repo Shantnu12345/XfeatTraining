@@ -8,7 +8,11 @@ import random
 import cv2
 import torch
 from torch.utils.data import Dataset
+
+
 _IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+
+
 def _pad_to_multiple(img, multiple=32):
     """Pad a 2-D array (H, W) on the right/bottom so both dims are divisible by *multiple*."""
     import numpy as np
@@ -18,6 +22,8 @@ def _pad_to_multiple(img, multiple=32):
     if pad_h == 0 and pad_w == 0:
         return img
     return np.pad(img, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+
+
 class RailDataset(Dataset):
     """
     Dataset that reads all images from *root_dir*, sorts by filename (timestamp),
@@ -51,8 +57,10 @@ class RailDataset(Dataset):
                 f"[RailDataset] Need at least 2 images in {root_dir}, found {len(self.image_paths)}."
             )
         print(f"[RailDataset] Found {len(self.image_paths)} images in {root_dir}")
+
     def __len__(self):
         return self.length
+
     def _load_image(self, path):
         """Read at native resolution, convert to grayscale, pad to mult of 32, return uint8 tensor [1,1,H,W]."""
         im = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -66,6 +74,7 @@ class RailDataset(Dataset):
         im_gray = _pad_to_multiple(im_gray, 32)
         t = torch.from_numpy(im_gray).unsqueeze(0).unsqueeze(0)  # [1,1,H,W], uint8
         return t
+
     def __getitem__(self, idx):
         # Sample two distinct random images
         i0, i1 = random.sample(range(len(self.image_paths)), 2)
