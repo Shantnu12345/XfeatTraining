@@ -4,12 +4,30 @@
          Extended with optional rail-manifold self-supervision (circular / linear).
 """
 import argparse
+import glob
 import os
+import sys
 import time
-import sys
-import sys
-import os
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+import cv2
+import numpy as np
+import tqdm
+import torch
+from torch import nn
+from torch import optim
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import Dataset, DataLoader
+
+from modules.model import *
+from modules.dataset.augmentation import *
+from modules.training.utils import *
+from modules.training.losses import *
+from modules.dataset.megadepth.megadepth import MegaDepthDataset
+from modules.dataset.megadepth import megadepth_warper
+from modules.dataset.rail_dataset import RailDataset
 
 
 def _parse_mat3(s):
@@ -55,9 +73,9 @@ def parse_arguments():
     parser.add_argument('--finetune_modules', type=str,
                    default='block_fusion,heatmap_head,keypoint_head,fine_matcher',
                    help='Comma-separated list of XFeatModel attribute names to unfreeze when --finetune_last_layers is set.')
-    parser.add_argument('--reinit_last_layers', action='store_true',
+    parser.add_argument('--reinit_last_layers', action='store_true', default=True,
                    help='Load pretrained weights for backbone, but re-initialize the modules '
-                        'listed in --finetune_modules with fresh random weights. All params remain trainable.')
+                        'listed in --finetune_modules with fresh random weights. All params remain trainable. Default=True')
     # --- Rail self-supervision (simple interface) ---
     parser.add_argument('--rail_mode', type=str, default='circular',
                         choices=['circular', 'linear'],
@@ -83,26 +101,6 @@ def parse_arguments():
     return args
 
 
-args = parse_arguments()
-
-import glob
-import tqdm
-import torch
-from torch import nn
-from torch import optim
-import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
-import numpy as np
-from modules.model import *
-from modules.dataset.augmentation import *
-from modules.training.utils import *
-from modules.training.losses import *
-from modules.dataset.megadepth.megadepth import MegaDepthDataset
-from modules.dataset.megadepth import megadepth_warper
-from modules.dataset.rail_dataset import RailDataset
-from torch.utils.data import Dataset, DataLoader
-
-
 class Trainer():
     """
         Class for training XFeat with default params as described in the paper.
@@ -110,21 +108,10 @@ class Trainer():
         The major bottleneck is to keep loading huge megadepth h5 files from disk,
         the network training itself is quite fast.
     """
-    def __init__(self, megadepth_root_path,
-                       synthetic_root_path,
-                       ckpt_save_path,
-                       model_name = 'xfeat_default',
-                       batch_size = 10, n_steps = 160_000, lr= 3e-4, gamma_steplr=0.5,
-                       training_res = (800, 608), device_num="0", dry_run = False,
-                       save_ckpt_every = 500,
-                       rail_mode = 'circular',
-                       rail_data_path = '',
-                       rail_lambda = 0.0,
-                       rail_k = None,
-                       device_calib_path = '',
-                       rail_cam_name = '',
-                       imu_name = ''):
-        self.dev = torch.device ('cuda' if torch.cuda.is_available() else 'cpu')
+    def __init__(self, args):
+        self.args = args
+
+        self.dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.net = XFeatModel().to(self.dev)
         if args.pretrained_path:
             ckpt = torch.load(args.pretrained_path, map_location=self.dev)
@@ -163,20 +150,19 @@ class Trainer():
             print(f"[FineTune] Trainable params: {n_train}/{n_total} ({100.0*n_train/max(n_total,1):.2f}%)")
 
         # Optimizer / scheduler (uses only params with requires_grad=True)
-        #Setup optimizer
-        self.batch_size = batch_size
-        self.steps = n_steps
-        self.opt = optim.Adam(filter(lambda x: x.requires_grad, self.net.parameters()) , lr = lr)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=30_000, gamma=gamma_steplr)
+        self.batch_size = args.batch_size
+        self.steps = args.n_steps
+        self.opt = optim.Adam(filter(lambda x: x.requires_grad, self.net.parameters()), lr=args.lr)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=30_000, gamma=args.gamma_steplr)
 
         ##################### Synthetic COCO INIT ##########################
-        if model_name in ('xfeat_default', 'xfeat_synthetic'):
+        if args.training_type in ('xfeat_default', 'xfeat_synthetic'):
             self.augmentor = AugmentationPipe(
-                                        img_dir = synthetic_root_path,
+                                        img_dir = args.synthetic_root_path,
                                         device = self.dev, load_dataset = True,
-                                        batch_size = int(self.batch_size * 0.4 if model_name=='xfeat_default' else batch_size),
-                                        out_resolution = training_res,
-                                        warp_resolution = training_res,
+                                        batch_size = int(self.batch_size * 0.4 if args.training_type=='xfeat_default' else args.batch_size),
+                                        out_resolution = args.training_res,
+                                        warp_resolution = args.training_res,
                                         sides_crop = 0.1,
                                         max_num_imgs = 3_000,
                                         num_test_imgs = 5,
@@ -189,15 +175,15 @@ class Trainer():
         ##################### Synthetic COCO END #######################
 
         ##################### MEGADEPTH INIT ##########################
-        if model_name in ('xfeat_default', 'xfeat_megadepth'):
-            TRAIN_BASE_PATH = f"{megadepth_root_path}/train_data/megadepth_indices"
-            TRAINVAL_DATA_SOURCE = f"{megadepth_root_path}/MegaDepth_v1"
+        if args.training_type in ('xfeat_default', 'xfeat_megadepth'):
+            TRAIN_BASE_PATH = f"{args.megadepth_root_path}/train_data/megadepth_indices"
+            TRAINVAL_DATA_SOURCE = f"{args.megadepth_root_path}/MegaDepth_v1"
             TRAIN_NPZ_ROOT = f"{TRAIN_BASE_PATH}/scene_info_0.1_0.7"
             npz_paths = glob.glob(TRAIN_NPZ_ROOT + '/*.npz')[:]
             data = torch.utils.data.ConcatDataset( [MegaDepthDataset(root_dir = TRAINVAL_DATA_SOURCE,
                                     npz_path = path) for path in tqdm.tqdm(npz_paths, desc="[MegaDepth] Loading metadata")] )
             self.data_loader = DataLoader(data,
-                                          batch_size=int(self.batch_size * 0.6 if model_name=='xfeat_default' else batch_size),
+                                          batch_size=int(self.batch_size * 0.6 if args.training_type=='xfeat_default' else args.batch_size),
                                           shuffle=True)
             self.data_iter = iter(self.data_loader)
         else:
@@ -205,9 +191,9 @@ class Trainer():
         ##################### MEGADEPTH INIT END #######################
 
         ##################### RAIL INIT ##########################
-        self.rail_enabled = (rail_lambda > 0.0 and rail_data_path != '')
-        self.rail_lambda = rail_lambda
-        self.rail_mode = rail_mode
+        self.rail_enabled = (args.rail_lambda > 0.0 and args.rail_data_path != '')
+        self.rail_lambda = args.rail_lambda
+        self.rail_mode = args.rail_mode
         self.rail_iter = None
         self.rail_k = None
         self.rail_cam = None
@@ -216,18 +202,16 @@ class Trainer():
         # Device frame convention: X=up, Y=left, Z=inward.  Rail plane = ZY plane.
         self.rail_r_cd = torch.eye(3, dtype=torch.float32, device=self.dev)
         self.rail_t_cd = torch.zeros(3, dtype=torch.float32, device=self.dev)
-        if device_calib_path:
-            # Load ombc/tbc (camera-in-body extrinsics) from <SFConfig>.
-            # Since device = body: R_cd = Rbc, t_cd = tbc (no inversion needed).
+        if args.device_calib_path:
             _r_cd_np, _t_cd_np = load_rail_extrinsics_from_calib(
-                device_calib_path,
-                imu_name=imu_name if imu_name else None
+                args.device_calib_path,
+                imu_name=args.imu_name if args.imu_name else None
             )
             self.rail_r_cd = torch.from_numpy(_r_cd_np).to(self.dev)
             self.rail_t_cd = torch.from_numpy(_t_cd_np).to(self.dev)
         if self.rail_enabled:
             # --- Intrinsics: prefer device_calib_path (fisheye-aware) over rail_k (pinhole) ---
-            if device_calib_path:
+            if args.device_calib_path:
                 import sys as _sys, os as _os
                 _pycam_root = _os.path.abspath(
                     _os.path.join(_os.path.dirname(__file__), '..', 'pycameramodel')
@@ -235,43 +219,43 @@ class Trainer():
                 if _pycam_root not in _sys.path:
                     _sys.path.insert(0, _pycam_root)
                 from pycameramodel import device as _pycam
-                _dev = _pycam.Device(device_calib_path)
+                _dev = _pycam.Device(args.device_calib_path)
                 cam_keys = list(_dev.cameras.keys())
                 if not cam_keys:
-                    raise RuntimeError(f"[Rail] No cameras found in {device_calib_path}")
-                cam_key = rail_cam_name if rail_cam_name in _dev.cameras else cam_keys[0]
+                    raise RuntimeError(f"[Rail] No cameras found in {args.device_calib_path}")
+                cam_key = args.rail_cam_name if args.rail_cam_name in _dev.cameras else cam_keys[0]
                 self.rail_cam = _dev.cameras[cam_key]
                 print(f"[Rail] Using pycameramodel fisheye undistortion: "
-                      f"calib={device_calib_path}, camera='{cam_key}'")
-            elif rail_k is not None:
-                self.rail_k = torch.tensor(rail_k, dtype=torch.float32, device=self.dev).view(3, 3)
+                      f"calib={args.device_calib_path}, camera='{cam_key}'")
+            elif args.rail_k is not None:
+                self.rail_k = torch.tensor(args.rail_k, dtype=torch.float32, device=self.dev).view(3, 3)
                 print(f"[Rail] Using pinhole K undistortion.")
             else:
                 raise RuntimeError(
                     "[Rail] Provide either --device_calib_path (fisheye) "
                     "or --rail_k (pinhole) when rail is enabled."
                 )
-            rail_ds = RailDataset(root_dir=rail_data_path,
-                                  length=n_steps)
+            rail_ds = RailDataset(root_dir=args.rail_data_path,
+                                  length=args.n_steps)
             self.rail_loader = DataLoader(rail_ds, batch_size=1, shuffle=True)
             self.rail_iter = iter(self.rail_loader)
-            print(f"[Rail] Enabled: mode={rail_mode}, lambda={rail_lambda}, "
-                  f"data={rail_data_path}, images={len(rail_ds.image_paths)}")
+            print(f"[Rail] Enabled: mode={args.rail_mode}, lambda={args.rail_lambda}, "
+                  f"data={args.rail_data_path}, images={len(rail_ds.image_paths)}")
         ##################### RAIL INIT END ########################
 
-        if model_name == 'xfeat_rail' and not self.rail_enabled:
+        if args.training_type == 'xfeat_rail' and not self.rail_enabled:
             raise RuntimeError(
                 "[xfeat_rail] --rail_data_path and --rail_lambda (> 0) are required, "
                 "plus either --device_calib_path (fisheye) or --rail_k (pinhole)."
             )
 
-        os.makedirs(ckpt_save_path, exist_ok=True)
-        os.makedirs(ckpt_save_path + '/logdir', exist_ok=True)
-        self.dry_run = dry_run
-        self.save_ckpt_every = save_ckpt_every
-        self.ckpt_save_path = ckpt_save_path
-        self.writer = SummaryWriter(ckpt_save_path + f'/logdir/{model_name}_' + time.strftime("%Y_%m_%d-%H_%M_%S"))
-        self.model_name = model_name
+        os.makedirs(args.ckpt_save_path, exist_ok=True)
+        os.makedirs(args.ckpt_save_path + '/logdir', exist_ok=True)
+        self.dry_run = args.dry_run
+        self.save_ckpt_every = args.save_ckpt_every
+        self.ckpt_save_path = args.ckpt_save_path
+        self.writer = SummaryWriter(args.ckpt_save_path + f'/logdir/{args.training_type}_' + time.strftime("%Y_%m_%d-%H_%M_%S"))
+        self.model_name = args.training_type
 
     @staticmethod
     def _reinit_module(module):
@@ -282,7 +266,6 @@ class Trainer():
 
     def _get_rail_pair(self, min_matches=30):
         """Get next rail image pair from the dataloader, resetting if exhausted. Uses SIFT matcher to ensure enough matches. Normalize only after match check."""
-        import cv2
         attempts = 0
         while attempts < 10000:
             try:
@@ -330,7 +313,7 @@ class Trainer():
     def train(self):
         self.net.train()
         # Keep BatchNorm layers frozen when fine-tuning only last layers
-        if getattr(args, 'finetune_last_layers', False):
+        if getattr(self.args, 'finetune_last_layers', False):
             for m in self.net.modules():
                 if isinstance(m, torch.nn.BatchNorm2d):
                     m.eval()
@@ -346,7 +329,7 @@ class Trainer():
 
         with tqdm.tqdm(total=self.steps) as pbar:
             for i in range(self.steps):
-                if getattr(args, 'finetune_last_layers', False):
+                if getattr(self.args, 'finetune_last_layers', False):
                     for m in self.net.modules():
                         if isinstance(m, torch.nn.BatchNorm2d):
                             m.eval()
@@ -506,7 +489,7 @@ class Trainer():
 
                 if (i+1) % self.save_ckpt_every == 0:
                     print('saving iter ', i+1)
-                    torch.save(self.net.state_dict(), self.ckpt_save_path + f'/{self.model_name}_{i+1}.pth')
+                    torch.save(self.net.state_dict(), self.ckpt_save_path + f'/{self.model_name}_{i+1}.pt')
 
                 pbar.set_description( 'Loss: {:.9f} acc_c0 {:.3f} acc_c1 {:.3f} acc_f: {:.3f} loss_c: {:.3f} loss_f: {:.3f} loss_kp: {:.3f} #matches_c: {:d} loss_kp_pos: {:.3f} acc_kp_pos: {:.3f} rail: {:.4f} Ldev: {:.4f} rail_nm: {:d}'.format(
                                         loss.item(), acc_coarse_0, acc_coarse, acc_coords, loss_coarse, loss_coord, loss_l1, nb_coarse, loss_kp_pos, acc_pos, rail_loss_val, rail_ldev_val, rail_n_matches) )
@@ -528,7 +511,10 @@ class Trainer():
                     self.writer.add_scalar('Rail/L_dev', rail_ldev_val, i)
                     self.writer.add_scalar('Rail/n_matches', rail_n_matches, i)
                     self.writer.add_scalar('Rail/aux', rail_aux, i)
-if __name__ == '__main__':
+def main():
+    args = parse_arguments()
+
+    # Override defaults for quick local testing (comment out for CLI usage)
     args.training_type = 'xfeat_rail'
     args.rail_mode = 'linear'
     args.rail_data_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
@@ -544,56 +530,9 @@ if __name__ == '__main__':
     # args.synthetic_root_path = '/local/mnt/workspace/v3dof/data/C_Building_Zumba_Room_Center/Linear_Rail/Foreseer/Capture_2/forseer_8220f229_2024-04-22-15-23-38/Camera2_train'
     # args.ckpt_save_path = '/local/mnt/workspace/v3dof/codes/XfeatTraining/modules/training/ckpt_linear_synth'
 
-    trainer = Trainer(
-        megadepth_root_path=args.megadepth_root_path,
-        synthetic_root_path=args.synthetic_root_path,
-        ckpt_save_path=args.ckpt_save_path,
-        model_name=args.training_type,
-        batch_size=args.batch_size,
-        n_steps=args.n_steps,
-        lr=args.lr,
-        gamma_steplr=args.gamma_steplr,
-        training_res=args.training_res,
-        device_num=args.device_num,
-        dry_run=args.dry_run,
-        save_ckpt_every=args.save_ckpt_every,
-        rail_mode=args.rail_mode,
-        rail_data_path=args.rail_data_path,
-        rail_lambda=args.rail_lambda,
-        rail_k=args.rail_k,
-        device_calib_path=args.device_calib_path,
-        rail_cam_name=args.rail_cam_name,
-        imu_name=args.imu_name,
-    )
-
-    #The most fun part
+    trainer = Trainer(args)
     trainer.train()
-# Example usage:
-#
-#   python -m modules.training.train \
-#     --training_type xfeat_default \
-#     --megadepth_root_path /path/to/MegaDepth \
-#     --synthetic_root_path /path/to/coco_20k \
-#     --ckpt_save_path /tmp/out
-#
-# With rail self-supervision (fisheye camera, extrinsics from device_calibration.xml):
-#
-#   python -m modules.training.train \
-#     --training_type xfeat_rail \
-#     --ckpt_save_path /tmp/out \
-#     --rail_mode circular \
-#     --rail_data_path /path/to/rail_images/ \
-#     --rail_lambda 0.2 \
-#     --device_calib_path /path/to/device_calibration.xml \
-#     --rail_cam_name <camera_name_in_xml> \
-#     --imu_name ""
-#
-# Device frame convention used in the rail geometry:
-#   X = up,  Y = left,  Z = inward (into the scene)
-#   Rail plane = ZY plane.
-#   Circular rail: rotation about X axis; reference position p0 = [0, 0, R] in device frame.
-#   Linear  rail: translation along Y axis (sideways).
-#
-# Extrinsics (ombc, tbc) are read from <SFConfig><Stateinit> in device_calibration.xml:
-#   ombc = Rodrigues angle-axis, CAM->BODY (camera in body);  tbc = cam origin in BODY frame.
-#   Since device = body: R_cd = Rbc = rodrigues(ombc),  t_cd = tbc  (no inversion).
+
+
+if __name__ == '__main__':
+    main()

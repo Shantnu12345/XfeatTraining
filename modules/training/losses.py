@@ -4,7 +4,8 @@ import numpy as _np
 import sys as _sys
 import os as _os
 from modules.dataset.megadepth import megadepth_warper
-from modules.trainz̄ing import utils# from third_party.alike_wrapper import extract_alike_kpts
+from modules.training import utils
+# from third_party.alike_wrapper import extract_alike_kpts
 """
 Rail self-supervision for circular / linear rail manifolds.
 Extrinsics are CAMERA->DEVICE: p_dev = R_cd p_cam + t_cd.
@@ -439,15 +440,15 @@ def load_rail_extrinsics_from_calib(device_calib_path, imu_name=None):
     Load camera-to-device extrinsics (R_cd, t_cd) from a device_calibration.xml.
     The ``<SFConfig><Stateinit>`` block stores camera-in-body extrinsics:
         ombc  - Rodrigues angle-axis rotation vector, CAMERA→BODY (camera in body)
-                p_body = R_bc @ p_cam + t_bc   where R_bc = rodrigues(ombc)
+                p_body = Rbc @ p_cam + tbc   where Rbc = rodrigues(ombc)
         tbc   - translation, camera origin expressed in BODY frame
     Device frame convention (as per hardware spec):
         X = up,  Y = left,  Z = inward (into the scene)
     Rail plane is the ZY plane.
     Since device = body, the camera-in-body extrinsics are directly
     camera→device:
-        R_cd = R_bc       (= rodrigues(ombc))
-        t_cd = t_bc
+        R_cd = Rbc       (= rodrigues(ombc))
+        t_cd = tbc
     Parameters
     ----------
     device_calib_path : str
