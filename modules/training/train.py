@@ -51,6 +51,9 @@ def parse_arguments():
     parser.add_argument('--finetune_modules', type=str,
                    default='block_fusion,heatmap_head,keypoint_head,fine_matcher',
                    help='Comma-separated list of XFeatModel attribute names to unfreeze when --finetune_last_layers is set.')
+    parser.add_argument('--reinit_last_layers', action='store_true',
+                   help='Load pretrained weights for backbone, but re-initialize the modules '
+                        'listed in --finetune_modules with fresh random weights. All params remain trainable.')
     # --- Rail self-supervision (simple interface) ---
     parser.add_argument('--rail_mode', type=str, default='circular',
                         choices=['circular', 'linear'],
@@ -119,6 +122,11 @@ class Trainer():
             state_dict = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
             self.net.load_state_dict(state_dict, strict=False)
             print(f"[Init] Loaded pretrained weights from: {args.pretrained_path}")
+        # Optional: reinitialize last layers with random weights
+        if getattr(args, 'reinit_last_layers', False):
+            for name in (m.strip() for m in str(args.finetune_modules).split(',') if m.strip()):
+                if hasattr(self.net, name):
+                    self._reinit_module(getattr(self.net, name))
         # ------------------------------
         # Optional fine-tuning: train only selected (late) modules
         # ------------------------------
@@ -247,6 +255,13 @@ class Trainer():
         self.ckpt_save_path = ckpt_save_path
         self.writer = SummaryWriter(ckpt_save_path + f'/logdir/{model_name}_' + time.strftime("%Y_%m_%d-%H_%M_%S"))
         self.model_name = model_name
+    @staticmethod
+    def _reinit_module(module):
+        """Reinitialize all parameters in a module using PyTorch's own defaults."""
+        for m in module.modules():
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+
     def _get_rail_pair(self, min_matches=30):
         """Get next rail image pair from the dataloader, resetting if exhausted. Uses SIFT matcher to ensure enough matches. Normalize only after match check."""
         import cv2
