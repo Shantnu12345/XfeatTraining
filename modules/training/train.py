@@ -413,6 +413,7 @@ class Trainer():
                 rail_loss_val = 0.0
                 rail_n_matches = 0
                 rail_aux = 0.0
+                rail_ldev_val = 0.0
                 if self.rail_enabled:
                     rail0, rail1 = self._get_rail_pair()
                     feats_r0, _, hmap_r0 = self.net(rail0)
@@ -450,6 +451,7 @@ class Trainer():
                         loss = loss + self.rail_lambda * J_m + rc["lambda_dev"] * L_dev + reg
                         rail_loss_val = J_m.item()
                         rail_aux = aux_param.item()
+                        rail_ldev_val = L_dev.item()
                 ##################### RAIL LOSS END ######################
                 # Compute Backward Pass
                 # In rail-only mode, skip the step if no rail matches were found
@@ -466,8 +468,8 @@ class Trainer():
                 if (i+1) % self.save_ckpt_every == 0:
                     print('saving iter ', i+1)
                     torch.save(self.net.state_dict(), self.ckpt_save_path + f'/{self.model_name}_{i+1}.pth')
-                pbar.set_description( 'Loss: {:.9f} acc_c0 {:.3f} acc_c1 {:.3f} acc_f: {:.3f} loss_c: {:.3f} loss_f: {:.3f} loss_kp: {:.3f} #matches_c: {:d} loss_kp_pos: {:.3f} acc_kp_pos: {:.3f} rail: {:.4f} rail_nm: {:d}'.format(
-                                        loss.item(), acc_coarse_0, acc_coarse, acc_coords, loss_coarse, loss_coord, loss_l1, nb_coarse, loss_kp_pos, acc_pos, rail_loss_val, rail_n_matches) )
+                pbar.set_description( 'Loss: {:.9f} acc_c0 {:.3f} acc_c1 {:.3f} acc_f: {:.3f} loss_c: {:.3f} loss_f: {:.3f} loss_kp: {:.3f} #matches_c: {:d} loss_kp_pos: {:.3f} acc_kp_pos: {:.3f} rail: {:.4f} Ldev: {:.4f} rail_nm: {:d}'.format(
+                                        loss.item(), acc_coarse_0, acc_coarse, acc_coords, loss_coarse, loss_coord, loss_l1, nb_coarse, loss_kp_pos, acc_pos, rail_loss_val, rail_ldev_val, rail_n_matches) )
                 pbar.update(1)
                 # Log metrics
                 self.writer.add_scalar('Loss/total', loss.item(), i)
@@ -482,6 +484,7 @@ class Trainer():
                 self.writer.add_scalar('Count/matches_coarse', nb_coarse, i)
                 if self.rail_enabled:
                     self.writer.add_scalar('Rail/J', rail_loss_val, i)
+                    self.writer.add_scalar('Rail/L_dev', rail_ldev_val, i)
                     self.writer.add_scalar('Rail/n_matches', rail_n_matches, i)
                     self.writer.add_scalar('Rail/aux', rail_aux, i)
 if __name__ == '__main__':
@@ -548,5 +551,5 @@ if __name__ == '__main__':
 #   Linear  rail: translation along Y axis (sideways).
 #
 # Extrinsics (ombc, tbc) are read from <SFConfig><Stateinit> in device_calibration.xml:
-#   ombc = Rodrigues angle-axis, BODY->CAMERA;  tbc = translation, BODY->CAM in BODY frame.
-#   Converted to camera->device: R_cd = R_bc^T,  t_cd = -R_bc^T @ t_bc.
+#   ombc = Rodrigues angle-axis, CAM->BODY (camera in body);  tbc = cam origin in BODY frame.
+#   Since device = body: R_cd = Rbc = rodrigues(ombc),  t_cd = tbc  (no inversion).
