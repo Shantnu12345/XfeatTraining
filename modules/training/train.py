@@ -119,11 +119,7 @@ class Trainer():
             self.net.load_state_dict(state_dict, strict=False)
             print(f"[Init] Loaded pretrained weights from: {args.pretrained_path}")
 
-        # Optional: reinitialize last layers with random weights
-        if getattr(args, 'reinit_last_layers', False):
-            for name in (m.strip() for m in str(args.finetune_modules).split(',') if m.strip()):
-                if hasattr(self.net, name):
-                    self._reinit_module(getattr(self.net, name))
+
 
         # ------------------------------
         # Optional fine-tuning: train only selected (late) modules
@@ -148,6 +144,12 @@ class Trainer():
             n_train = sum(p_.numel() for p_ in self.net.parameters() if p_.requires_grad)
             n_total = sum(p_.numel() for p_ in self.net.parameters())
             print(f"[FineTune] Trainable params: {n_train}/{n_total} ({100.0*n_train/max(n_total,1):.2f}%)")
+
+            # Optional: reinitialize last layers with random weights
+            if getattr(args, 'reinit_last_layers', False):
+                for name in (m.strip() for m in str(args.finetune_modules).split(',') if m.strip()):
+                    if hasattr(self.net, name):
+                        self._reinit_module(getattr(self.net, name))
 
         # Optimizer / scheduler (uses only params with requires_grad=True)
         self.batch_size = args.batch_size
